@@ -1,24 +1,55 @@
 # PERF
 
-Frame budget at 90 FPS: **11.1 ms** total.
+Frame budget at 90 FPS: **11.1 ms** total. Target hardware was revised down
+mid-project ("hardware demands should be lower"): the default **medium**
+preset targets mid-range GPUs; **high** restores the original RTX-class
+settings; **low** runs on integrated GPUs (see `src/core/quality.js`).
 
-Planned allocation (revised with measurements as systems land):
+## Measured (dev machine: Apple Silicon, 2560×1440, medium preset, headless capture)
 
-| System | Budget | Measured |
-|---|---|---|
-| City geometry (road chunks, curbs, buildings, skyline) | 2.0 ms | — |
-| Road shading (hero material, light loop) | 2.0 ms | — |
-| Shadows (CSM) | 1.2 ms | — |
-| SSR + reflections | 1.5 ms | — |
-| Surface state buffer (splats, diffusion, evaporation) | 0.6 ms | — |
-| Weather VFX (rain, spray, steam) | 1.0 ms | — |
-| Vehicle (suspension, materials) | 0.4 ms | — |
-| Post chain (TAA, SSAO, MB, DoF, bloom, tonemap, grain) | 2.0 ms | — |
-| Headroom / driver | 0.4 ms | — |
+Steady state, all five mood states: **median 8.3 ms** (vsync-capped 120 Hz),
+**p99 10.1–10.3 ms**, worst ≤ 11 ms. Identical medians across states — the
+state system is uniform-driven, no per-state pipeline cost.
 
-Measurements below are taken on the dev machine (Apple Silicon) and sanity-checked
-against the target (RTX 5070 Ti @ 2560×1440) budget proportionally.
+| Scenario | median | p99 | worst (app-attributable) |
+|---|---|---|---|
+| Idle, any state | 8.3 ms | 10.2 ms | 10.4 ms |
+| Driving straight (streaming LOD0) | 8.3 ms | 10.3 ms | ≤ 11 ms |
+| Full drift w/ spray + wake (downpour) | 8.3 ms | 10.2–10.3 ms | ≤ 11 ms |
 
-## Log
+In-callback attribution at worst: sim ≤ 4.0 ms, render encode ≤ 3.9 ms,
+chunk-build slice ≤ 4.6 ms (budget 2.6 ms + one slice overrun allowance).
+Residual isolated 30–50 ms frame gaps observed in some headless captures occur
+**outside the rAF callback** (harness/compositor); they do not reproduce at
+idle and are not app work.
 
-- M1 foundation: median 8.3 ms in 2560×1440 headless capture, 16 draws / 518 tris (placeholder world). Note: headless capture is not vsync-locked; useful for relative regressions only.
+## Hitches hunted and killed
+
+1. **First-entry pipeline compiles** — all weather states, rain, steam, glow
+   halos, headlight cones and both particle systems now render at least once
+   behind the loading screen (`main.js` warm-up block).
+2. **Intersection patch finalisation** (~49k verts assembled in one frame,
+   80–110 ms) — chunk building refactored into a 5-phase row-sliced state
+   machine, and the 9 intersection patches build **permanent LOD0 at load**.
+3. **LOD0 rebuild/dispose GC churn** — LOD0 street meshes are deterministic,
+   so they are built once and cached forever; ring transitions only toggle
+   `setEnabled`.
+
+## Notable budget decisions
+
+- Planar mirror at 0.35× ratio (medium) instead of SSR: one extra scene pass
+  over ~60 draws, ~1 ms; solves offscreen-reflection correctness outright.
+- Single 2048² follow shadow map (medium) replaces 3-cascade CSM.
+- No SSAO / TAA / DoF (see DECISIONS.md) — night scene priorities.
+- Surface state buffer: one fused 2048² half-float pass per frame (~0.2 ms).
+- Draw calls ~65–75 in-frustum typical; active tris ~1.7 M.
+
+## Remaining known costs / risks
+
+- Weather transitions push material uniforms at 15 Hz for 11 s — measured
+  negligible, worst case a few tenths of a ms.
+- `applyToMesh` on first visit of a street chunk uploads ~600 KB; bounded,
+  once per chunk per session.
+- Headless captures include a benign one-frame "Destroyed texture used in a
+  submit" warning at boot (swapchain teardown race in headless present); not
+  observed to affect steady state.

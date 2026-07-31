@@ -171,7 +171,7 @@ async function main() {
   window.addEventListener('resize', () => engine.resize());
 
   // ---- debug / capture handle ----
-  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, ready: false, frame: 0, refreshRenderLists, cityModules };
+  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
   window.__NIGHTLOOP__ = NL;
   window.BABYLON = BABYLON; // debug console access
 
@@ -186,8 +186,15 @@ async function main() {
     steam.mesh.setEnabled(true);
     steam.material.setFloat('amount', 1);
     cones.applyEnvironment(env, 1.2);
+    // particle pipelines must compile now, not on the first puddle
+    tyreFX.spray[0].emitRate = 400;
+    tyreFX.spray[1].emitRate = 400;
+    tyreFX.smoke.emitRate = 100;
     scene.render();
     scene.render();
+    tyreFX.spray[0].emitRate = 0;
+    tyreFX.spray[1].emitRate = 0;
+    tyreFX.smoke.emitRate = 0;
     weather.jumpTo(5);   // fog halos path
     scene.render();
     weather.jumpTo(bootState);
@@ -274,7 +281,12 @@ async function main() {
     }
 
     post.setSpeed(car.speed);
+    const tR0 = performance.now();
     scene.render();
+    const tR1 = performance.now();
+    if (tR1 - tR0 > NL.maxRenderMs) NL.maxRenderMs = tR1 - tR0;
+    const simMs = tR0 - now;
+    if (simMs > NL.maxSimMs) NL.maxSimMs = simMs;
     overlay.update(now);
 
     NL.frame++;
