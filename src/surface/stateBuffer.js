@@ -20,7 +20,6 @@ import stateFragment from '../shaders/surfaceState.fragment.wgsl?raw';
 
 defineParam('stateEvaporation', 0.5, { label: 'evaporation', section: 'surface', min: 0, max: 2, step: 0.05 });
 defineParam('stateRubberStrength', 1.0, { label: 'rubber strength', section: 'surface', min: 0, max: 3, step: 0.05 });
-defineParam('stateRidgeStrength', 1.0, { label: 'ridge strength', section: 'surface', min: 0, max: 3, step: 0.05 });
 
 const SIZE = quality.stateSize;
 const HALF_EXTENT = 40;         // buffer covers ±40 m around the car
@@ -114,7 +113,7 @@ export class SurfaceState {
     d[o + 4] = lenM / span;
     d[o + 5] = widthM / span;
     d[o + 6] = clear;
-    d[o + 7] = ridge * params.stateRidgeStrength;
+    d[o + 7] = ridge; // unused since ridge visuals were removed; kept for layout
     d[o + 8] = damp;
     d[o + 9] = rubber * params.stateRubberStrength;
     d[o + 10] = avail;

@@ -18,3 +18,5 @@ Deviations from the brief and notable technical choices, one line each.
 - **FXAA + post-sharpen instead of TAA** — TAA on a fast chase camera without full motion vectors ghosts the one thing that must stay crisp (the car); glints are hash-stable in world space so the main TAA benefit is moot.
 - **No DoF** — "very restrained" at driving FOV/speeds rounds to off; dropped for clarity and frame budget.
 - **Glide alt input: Shift** — RMB stays primary; Shift serves trackpads (and synthetic-event test rigs which cannot deliver right-button events).
+- **Displaced-water ridge visuals removed** (user direction) — the bright wavy ridge ribbons along tyre tracks read as melting asphalt; tracks now show as cleared water + damp + rubber only. The state-buffer G channel and splat slot remain for possible re-tuning.
+- **Procedural engine audio added** (user direction; supersedes the brief's "no audio") — pure WebAudio (3 oscillators + filtered noise), RPM from speed through fake gear ratios, louder under throttle/drift, idle at rest; starts on first input per autoplay policy; volume slider in the overlay.

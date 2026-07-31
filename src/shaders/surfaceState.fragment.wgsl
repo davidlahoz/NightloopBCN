@@ -55,14 +55,10 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     let sw = max(a1.y, 1e-5);
     let g = exp(-(along * along) / (2.0 * sl * sl) - (across * across) / (2.0 * sw * sw));
     // contact patch: clear water, lay damp + rubber
+    // (displaced-water ridge lobes removed — they read as melting asphalt)
     s.r = min(s.r + g * a1.z, 1.0);
     s.b = min(s.b + g * a2.x, 1.0);
     s.a = min(s.a + g * a2.y, 1.0);
-    // displaced ridge: two lobes at the patch sides, fed by availability
-    let ro = sw * 2.3;
-    let dAcross = abs(across) - ro;
-    let gr = exp(-(along * along) / (2.0 * sl * sl * 2.2) - (dAcross * dAcross) / (2.0 * sw * sw * 0.8));
-    s.g = min(s.g + gr * a1.w * a2.z, 2.5);
   }
 
   fragmentOutputs.color = s;

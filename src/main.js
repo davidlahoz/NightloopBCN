@@ -28,6 +28,7 @@ import { Steam } from './vfx/steam.js';
 import { TyreFX } from './vfx/spray.js';
 import { Litter } from './vfx/litter.js';
 import { HeadlightCones } from './vfx/headlightCones.js';
+import { EngineAudio } from './audio/engine.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -121,6 +122,9 @@ async function main() {
   // volumetric headlight cones (rain/fog only)
   const cones = new HeadlightCones(scene, car);
 
+  // procedural engine sound (starts on first input — autoplay policy)
+  const engineAudio = new EngineAudio();
+
   // weather/mood states (keys 1–5) — drives env params + physical wet lag
   const weather = new WeatherSystem(env, [...cityModules, roadMat], post, refreshRoadLights);
   const rain = new Rain(scene, env);
@@ -171,7 +175,7 @@ async function main() {
   window.addEventListener('resize', () => engine.resize());
 
   // ---- debug / capture handle ----
-  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
+  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, engineAudio, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
   window.__NIGHTLOOP__ = NL;
   window.BABYLON = BABYLON; // debug console access
 
@@ -231,25 +235,24 @@ async function main() {
       const dx = wvx * il, dz = wvz * il;
       const sp = car.speed;
       const clear = Math.min(0.12 + sp * 0.05, 0.8);
-      const ridge = Math.min(sp * 0.06, 0.9);
       const slip = car.driftAmount * 0.7 + (input.brake && sp > 6 ? 0.35 : 0) + Math.abs(car.slipYawOffset) * 1.4;
       const rubber = sp > 4 ? Math.min(slip * 0.6, 1.0) * 0.055 * (dt * 90) : 0;
       const len = Math.max(0.16, sp * dt * 0.85);
-      const avail = params.roadWetness;
-      // Glide wake: sliding tyres clear a wider swath and throw bigger ridges
+      // Glide wake: sliding tyres clear a wider swath
+      // (displaced-water ridges removed — they read as melting asphalt)
       const width = 0.115 * (1 + car.driftAmount * 0.9);
-      const ridgeK = ridge * (1 + car.driftAmount * 1.3);
       for (let i = 0; i < 4; i++) {
         const rear = i >= 2;
         surface.addSplat(
           car.wheelContactX[i], car.wheelContactZ[i], dx, dz,
-          len, rear ? width : 0.115, clear, rear ? ridgeK : ridge, 0.22,
-          rear ? rubber : rubber * 0.3, avail,
+          len, rear ? width : 0.115, clear, 0, 0.22,
+          rear ? rubber : rubber * 0.3, 0,
         );
       }
     }
     surface.update(dt, car.position.x, car.position.z, env.params);
     tyreFX.update(dt, car, params.roadWetness);
+    engineAudio.update(dt, car, input);
 
     weather.update(dt, input);
     rain.update(dt, chase.cam, env.params.rainRate);
