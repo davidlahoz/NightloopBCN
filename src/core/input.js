@@ -28,6 +28,7 @@ export class Input {
         if (n >= 1 && n <= 3) this.moodKey = n;
       }
       if (e.code === 'KeyC') this.toggleCamera = true;
+      if (e.code === 'Space') e.preventDefault();   // handbrake, not page scroll
     });
     window.addEventListener('keyup', (e) => { this.down[e.code] = false; });
     window.addEventListener('blur', () => {
@@ -84,6 +85,9 @@ export class Input {
 
   /** Glide is RMB or Shift (trackpad-friendly alternative). */
   get gliding() { return this.rmb || !!this.down['ShiftLeft'] || !!this.down['ShiftRight']; }
+
+  /** Space = handbrake (locks the rear: hard decel + slide, arcade style). */
+  get handbrake() { return !!this.down['Space']; }
 
   get throttle() { return this.down['KeyW'] || this.down['ArrowUp'] ? 1 : 0; }
   get brake() { return this.down['KeyS'] || this.down['ArrowDown'] ? 1 : 0; }

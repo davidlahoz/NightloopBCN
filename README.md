@@ -45,6 +45,7 @@ npm run dev        # http://localhost:5174  (Chrome desktop, WebGPU required)
 |---|---|
 | `W A S D` / arrows | throttle · steer · brake |
 | **hold RMB** (or Shift) | **Glide** — sustained low-anger drift; the mouse carves the line |
+| `Space` | handbrake — locks the rear for hard stops and slide entries |
 | mouse | orbit camera (recentres while driving) |
 | scroll | camera zoom |
 | `C` | chase ↔ bumper camera |

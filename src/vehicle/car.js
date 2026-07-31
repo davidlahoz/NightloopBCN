@@ -234,8 +234,8 @@ export class Car {
     const steerTarget = (input.steer * params.carSteerMax * kbScale + this.carve) * speedFade;
     this.steerAngle += (steerTarget - this.steerAngle) * DAMP(8, dt);
 
-    // ---- glide state eases in/out ----
-    const glideTarget = input.gliding && Math.abs(this.vz) > 6 ? 1 : 0;
+    // ---- glide state eases in/out (handbrake at speed also breaks the rear loose) ----
+    const glideTarget = (input.gliding || input.handbrake) && Math.abs(this.vz) > 6 ? 1 : 0;
     this.driftAmount += (glideTarget - this.driftAmount) * DAMP(glideTarget ? 3.2 : 2.2, dt);
 
     // ---- longitudinal ----
@@ -246,6 +246,11 @@ export class Car {
     if (input.brake > 0) {
       if (this.vz > 0.5) { az -= params.carBrake; this.braking = true; }
       else az -= params.carAccel * 0.55;
+    }
+    // handbrake: locked rears drag hard (less than the pedal, never reverses)
+    if (input.handbrake && Math.abs(this.vz) > 0.5) {
+      az -= Math.sign(this.vz) * 8.5;
+      this.braking = true;
     }
     az -= this.vz * 0.045 + Math.sign(this.vz) * 0.35;
     // drift scrub: sliding sideways bleeds speed (weighty, not floaty)
@@ -439,7 +444,16 @@ export class Car {
     // ---- wheels: plant on ground, spin, steer ----
     const spinRate = this.vz / this.wheelRadius;
     this.materials.setBrake(this.braking);
-    if (this._tailMat) this._tailMat.emissiveIntensity = this.braking ? 3.4 : 1.2;
+    if (this._tailMat) {
+      if (this.vz < -0.3) {
+        // reversing: white reverse lamps in the tail cluster (European style)
+        this._tailMat.emissiveColor.copyFromFloats(1.0, 0.95, 0.8);
+        this._tailMat.emissiveIntensity = 2.2;
+      } else {
+        this._tailMat.emissiveColor.copyFromFloats(1.0, 0.08, 0.03);
+        this._tailMat.emissiveIntensity = this.braking ? 3.4 : 1.2;
+      }
+    }
     if (this._mw) {
       // GLB wheels: pivots live inside the glTF's own (mirrored) space, so
       // steer/spin are axis-angle around the pre-mapped local axes
