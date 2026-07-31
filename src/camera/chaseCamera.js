@@ -69,8 +69,8 @@ export class ChaseCamera {
     }
     this.zoom += (this._zoomTarget - this.zoom) * DAMP(6, dt);
 
-    // ---- mouse orbit ----
-    if (input.mouseDX !== 0 || input.mouseDY !== 0) {
+    // ---- mouse orbit (the mouse carves the car's line during Glide) ----
+    if (!input.rmb && (input.mouseDX !== 0 || input.mouseDY !== 0)) {
       this.orbitYaw += input.mouseDX * 0.0032;
       this.orbitPitch += input.mouseDY * 0.0022;
       const pLim = 0.55;
@@ -160,7 +160,7 @@ export class ChaseCamera {
 
     // ---- fov ----
     const speedT = speed / 38;
-    const fovT = (params.camFov + params.camFovSpeed * (speedT > 1 ? 1 : speedT) * speedT) * (Math.PI / 180);
+    const fovT = (params.camFov + params.camFovSpeed * (speedT > 1 ? 1 : speedT) * speedT + car.driftAmount * 5.5) * (Math.PI / 180);
     this._smoothFov += (fovT - this._smoothFov) * DAMP(2.5, dt);
     this.cam.fov = this._smoothFov;
 

@@ -26,6 +26,7 @@ import { Rain } from './weather/rain.js';
 import { Glow } from './vfx/glow.js';
 import { Steam } from './vfx/steam.js';
 import { TyreFX } from './vfx/spray.js';
+import { Litter } from './vfx/litter.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -100,6 +101,8 @@ async function main() {
   cityModules.push(glow);
   const steam = new Steam(scene);
   cityModules.push(steam);
+  const litter = new Litter(scene);
+  cityModules.push(litter);
 
   // surface state buffer (tyres write, road reads)
   const surface = new SurfaceState(scene, roadMat);

@@ -4,6 +4,7 @@
  * The scene's HDR environment (loaded here once) feeds all PBR reflections.
  */
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { HDRCubeTexture } from '@babylonjs/core/Materials/Textures/hdrCubeTexture.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
@@ -107,25 +108,29 @@ export class CarMaterials {
     liner.roughness = 1;
     this.liner = liner;
 
-    // ---- tyre ----
-    const tire = new PBRMaterial('nlCarTire', scene);
-    tire.albedoColor = new Color3(0.014, 0.014, 0.015);
-    tire.metallic = 0;
-    tire.roughness = 0.88;
+    // ---- tyre: unlit near-black (tyres at dusk are voids with a whisper of sheen;
+    // the PBR path made the sidewall read pale under the sky dome) ----
+    const tire = new StandardMaterial('nlCarTire', scene);
+    tire.diffuseColor = new Color3(0, 0, 0);
+    tire.specularColor = new Color3(0.02, 0.02, 0.022);
+    tire.emissiveColor = new Color3(0.012, 0.012, 0.013);
+    tire.specularPower = 24;
     this.tire = tire;
 
-    // ---- rim: gunmetal ----
+    // ---- rim: dark gunmetal (kept dim — silver rims blow out at dusk) ----
     const rim = new PBRMaterial('nlCarRim', scene);
-    rim.albedoColor = new Color3(0.072, 0.075, 0.082);
-    rim.metallic = 0.95;
-    rim.roughness = 0.30;
+    rim.albedoColor = new Color3(0.045, 0.047, 0.052);
+    rim.metallic = 0.92;
+    rim.roughness = 0.38;
+    rim.environmentIntensity = 0.55;
     this.rim = rim;
 
-    // ---- brake ----
+    // ---- brake: dark steel disc + caliper ----
     const brake = new PBRMaterial('nlCarBrake', scene);
-    brake.albedoColor = new Color3(0.055, 0.022, 0.020);
-    brake.metallic = 0.5;
-    brake.roughness = 0.55;
+    brake.albedoColor = new Color3(0.035, 0.026, 0.024);
+    brake.metallic = 0.7;
+    brake.roughness = 0.45;
+    brake.environmentIntensity = 0.4;
     this.brake = brake;
 
     // ---- lights ----

@@ -7,6 +7,10 @@
  * roll from ground speed and steer with Ackermann geometry.
  */
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Vector3, Quaternion } from '@babylonjs/core/Maths/math.vector.js';
 import { defineParam, params } from '../core/params.js';
 import { buildCarBody } from './carBody.js';
@@ -22,7 +26,7 @@ defineParam('carSteerMax', 0.52, { label: 'steer max rad', section: 'car', min: 
 defineParam('carGlideYawGain', 1.35, { label: 'glide yaw gain', section: 'car', min: 0.5, max: 3, step: 0.05 });
 
 const WHEELBASE = 2.62;
-const TRACK = 1.52;
+const TRACK = 1.56;   // slightly wider than spec: plants the tyres flush with the fenders
 const WHEEL_R = 0.325;
 
 const DAMP = (rate, dt) => 1 - Math.exp(-rate * dt);
@@ -44,6 +48,8 @@ export class Car {
     this.driftAmount = 0;
     this.slipYawOffset = 0;
     this.braking = false;
+    /** mouse-carved steering bias while gliding (rad) */
+    this.carve = 0;
 
     // sprung body spring state (heave m, pitch rad, roll rad)
     this._heave = 0; this._heaveV = 0;
@@ -91,6 +97,45 @@ export class Car {
     }
     this.bodyMeshes = parts;
 
+    // soft contact-shadow blob — cheap AO that keeps the car grounded even
+    // when the whole street is in building shadow
+    {
+      const S = 128;
+      const tex = new DynamicTexture('nlCarAO', { width: S, height: S }, scene, true);
+      const ctx = tex.getContext();
+      const img = ctx.createImageData(S, S);
+      for (let y = 0; y < S; y++) {
+        for (let x = 0; x < S; x++) {
+          const dx = (x - S / 2) / (S / 2), dy = (y - S / 2) / (S / 2);
+          // rounded-rect falloff matching the car footprint
+          const rx = Math.max(0, Math.abs(dx) - 0.60) / 0.40;
+          const ry = Math.max(0, Math.abs(dy) - 0.52) / 0.48;
+          const d = Math.sqrt(rx * rx + ry * ry);
+          const a = Math.max(0, 1 - d) ** 2 * 195;
+          const i = (y * S + x) * 4;
+          img.data[i] = 0; img.data[i + 1] = 0; img.data[i + 2] = 0; img.data[i + 3] = a | 0;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      tex.update(false);
+      tex.hasAlpha = true;
+      const blobMat = new StandardMaterial('nlCarAOMat', scene);
+      blobMat.diffuseTexture = tex;
+      blobMat.diffuseColor = new Color3(0, 0, 0);
+      blobMat.emissiveColor = new Color3(0, 0, 0);
+      blobMat.specularColor = new Color3(0, 0, 0);
+      blobMat.opacityTexture = tex;
+      blobMat.disableLighting = true;
+      const blob = MeshBuilder.CreateGround('carAOBlob', { width: 4.9, height: 2.35 }, scene);
+      blob.rotation.y = Math.PI / 2;
+      blob.bakeCurrentTransformIntoVertices();
+      blob.material = blobMat;
+      blob.parent = this.root;
+      blob.position.y = 0.03;
+      blob.isPickable = false;
+      blob.metadata = { nlNoShadow: true, nlNoMirror: true };
+    }
+
     // ---- wheels ----
     this.wheels = [];
     for (let i = 0; i < 4; i++) {
@@ -128,9 +173,13 @@ export class Car {
    * @param {(x:number,z:number)=>number} groundHeight
    */
   update(dt, input, groundHeight) {
-    // ---- steering ----
+    // ---- steering (mouse carves the line while gliding) ----
+    if (input.rmb) this.carve += input.mouseDX * 0.0011;
+    this.carve -= this.carve * DAMP(input.rmb ? 1.1 : 6.0, dt);
+    if (this.carve > 0.55) this.carve = 0.55;
+    if (this.carve < -0.55) this.carve = -0.55;
     const speedFade = 1 / (1 + Math.abs(this.vz) * 0.045);
-    const steerTarget = input.steer * params.carSteerMax * speedFade;
+    const steerTarget = (input.steer * params.carSteerMax + this.carve) * speedFade;
     this.steerAngle += (steerTarget - this.steerAngle) * DAMP(8, dt);
 
     // ---- glide state eases in/out ----
@@ -147,6 +196,8 @@ export class Car {
       else az -= params.carAccel * 0.55;
     }
     az -= this.vz * 0.045 + Math.sign(this.vz) * 0.35;
+    // drift scrub: sliding sideways bleeds speed (weighty, not floaty)
+    az -= Math.abs(this.vx) * 0.11 * this.driftAmount;
     this.vz += az * dt;
     if (Math.abs(this.vz) < 0.15 && input.throttle === 0 && input.brake === 0) this.vz = 0;
 
@@ -175,6 +226,11 @@ export class Car {
 
     this.speed = Math.hypot(this.vx, this.vz);
     this.slipYawOffset = this.speed > 2 ? Math.atan2(this.vx, Math.abs(this.vz)) : 0;
+    // forgiving: past ~30° of slip the rear catches — no surprise spins
+    if (this.driftAmount > 0.2) {
+      const overshoot = Math.abs(this.slipYawOffset) - 0.52;
+      if (overshoot > 0) this.yawRate -= Math.sign(this.slipYawOffset) * overshoot * 3.0 * dt * this.driftAmount * 10;
+    }
     this.localAccelZ = (this.vz - this._prevVz) / (dt || 1);
     const latAccel = (this.vx - this._prevVx) / (dt || 1);
     this._prevVz = this.vz;
