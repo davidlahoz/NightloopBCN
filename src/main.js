@@ -29,6 +29,7 @@ import { TyreFX } from './vfx/spray.js';
 import { Litter } from './vfx/litter.js';
 import { HeadlightCones } from './vfx/headlightCones.js';
 import { EngineAudio } from './audio/engine.js';
+import { Speedo } from './ui/speedo.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -124,6 +125,7 @@ async function main() {
 
   // procedural engine sound (starts on first input — autoplay policy)
   const engineAudio = new EngineAudio();
+  const speedo = new Speedo();
 
   // weather/mood states (keys 1–5) — drives env params + physical wet lag
   const weather = new WeatherSystem(env, [...cityModules, roadMat], post, refreshRoadLights);
@@ -291,6 +293,7 @@ async function main() {
     const simMs = tR0 - now;
     if (simMs > NL.maxSimMs) NL.maxSimMs = simMs;
     overlay.update(now);
+    speedo.update(now, car.speed);
 
     NL.frame++;
     if (!NL.ready && NL.frame === 8) {

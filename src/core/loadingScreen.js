@@ -19,6 +19,8 @@ export const loadingScreen = {
       this._root.remove();
       const hint = document.getElementById('controls-hint');
       if (hint) hint.classList.add('visible');
+      const speedo = document.getElementById('speedo');
+      if (speedo) speedo.classList.add('visible');
     }, 1600);
   },
 
