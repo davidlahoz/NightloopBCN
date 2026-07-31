@@ -1,12 +1,16 @@
 # NIGHTLOOP
 
-A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet city street at dusk, drift through a four-block loop for ninety seconds. Either it looks AAA or you close the tab.
+A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet city street at night, and drive — the city never ends. Either it looks AAA or you close the tab.
 
 ## What This Is
 
 - **Not a game.** No gameplay loop, no traffic laws, no objectives.
 - **Pure visuals.** Every frame is art-directed. Every frame is the product.
-- **Hyper-focused.** One small city, fully finished. Four blocks, ninety seconds, one long drift through rain-soaked streets.
+- **Endless.** The city is a periodic procedural grid streamed around the car
+  — roads, curbs, buildings, signage, lights are generated on the fly and
+  discarded behind you. Every 4th east-west road is a six-lane motorway with
+  a barriered centre median. Drive any direction forever; revisited streets
+  are always identical (everything is seeded from cell coordinates).
 
 ## The Stack
 
@@ -45,14 +49,16 @@ npm run dev        # http://localhost:5174  (Chrome desktop, WebGPU required)
 | scroll | camera zoom |
 | `C` | chase ↔ bumper camera |
 | `M` | mute / unmute engine sound |
-| `1–5` | mood states: Golden · Blue hour · Downpour · Afterglow · Fogbank |
-| `` ` `` / `F1` | settings + performance overlay |
+| `1–3` | time of day: Day · Afternoon · Night |
+| `0` / `` ` `` / `F1` | settings + performance overlay |
 
-Weather states transition physically over ~11 s — the sun travels, fog
-thickens, rain fills the street, and the asphalt dries in real time after the
-rain stops. Everything the tyres do is written into a surface state buffer:
-water is displaced with a visible ridge, tracks disturb the reflections,
-drifts leave rubber arcs that persist for minutes.
+Time-of-day transitions blend over ~4 s — the sun travels, the lights come
+on, and the street's wetness lags physically (the night street stays damp
+and dries in real time by day). Everything the tyres do is written into a
+surface state buffer: tracks clear standing water and disturb the
+reflections, drifts leave rubber arcs that persist for minutes. Curbs are
+drivable bumps, not walls — the hard stops are building faces and the
+motorway median barriers.
 
 Quality presets (low / medium / high) live in the overlay; medium is the
 default. `?q=high` / `?q=low` and `?state=N` work as URL parameters.

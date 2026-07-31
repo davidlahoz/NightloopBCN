@@ -1,18 +1,19 @@
 /**
- * Curbs — the street edge: rolled curbs, sidewalks, dead-end caps, manhole
- * covers and storm-drain grates.
+ * Curbs — the street edge: rolled curbs, sidewalks, manhole covers and
+ * storm-drain grates, STREAMED per block around the car (the city is endless).
  *
  * Owns the SDF band d ∈ [0, 3.0] around every street (curb 0..0.15, sidewalk
- * 0.15..3.0), built as annular grids that follow the exact curb line the road
- * SDF produces (straights at CURB_FACE, corners as CORNER_R fillet arcs, sharp
- * offset corners at the street dead-ends). Every vertex height comes from
- * groundHeight(), every normal from groundNormal() — this module never invents
- * heights, so it seam-matches the road mesh (d<0) and the block modules (d≥3)
- * by construction.
+ * 0.15..3.0). In the periodic plan every block is a closed loop: 4 straights
+ * (using each street's own curb face — motorway rows are wider) joined by 4
+ * CORNER_R fillet arcs. Every vertex height comes from groundHeight(), every
+ * normal from groundNormal() — this module never invents heights, so it
+ * seam-matches the road mesh (d<0) and the block modules (d≥3) by
+ * construction.
  *
- * Draw calls: 4 quadrants × {curb concrete, sidewalk paving} = 8, plus one
- * thin-instanced manhole mesh and one thin-instanced drain mesh = 10 total.
- * Everything is static: world matrices frozen, thin-instance buffers static.
+ * Streaming: blocks inside R_BUILD of the car are built cooperatively (a
+ * generator emits ~40 path rows per slice under the shared build budget) and
+ * disposed beyond R_DROP. Manholes/drains are thin-instance buffers rebuilt
+ * from the region every ~48 m of travel.
  */
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
@@ -20,26 +21,30 @@ import '@babylonjs/core/Meshes/thinInstanceMesh.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
 import {
-  STREETS_X, STREETS_Z, CURB_FACE, CURB_W, CURB_H, SIDEWALK_EDGE,
-  CORNER_R, EXTENT_X, EXTENT_Z, blockRects, streetSegments, intersections,
+  PERIOD_X, PERIOD_Z, CURB_FACE, CURB_W, CURB_H, CORNER_R,
+  rowFace, blocksInRegion, segmentsInRegion, crossingsInRegion, cellSeed,
 } from './cityPlan.js';
 import { groundHeight, groundNormal, crossProfile } from './roadProfile.js';
 import { valueNoise, hash2 } from './noise.js';
+import { buildBudget } from '../core/buildBudget.js';
+
+const R_BUILD = 300;       // blocks exist inside this distance of the car
+const R_DROP = 340;        // …and are disposed beyond this
+const RESCAN_DIST = 22;    // staggered vs roads (24) / buildings (26)
+const R_INST = 260;        // manhole/drain instancing radius
+const INST_RESCAN = 44;    // staggered vs props (52)
+const ROWS_PER_SLICE = 40;
 
 // ---------------------------------------------------------------------------
 // Cross-section stations (metres of SDF distance d from the curb face).
 // The last two sidewalk stations straddle the d=3.0 zone boundary by ±3 mm:
 // groundHeight() is intentionally discontinuous there (block plinth sits 2 cm
 // up) and sampling exactly at 3.0 would flip branches per-vertex on FP noise.
-// 2.997 stays branch-stable on the sidewalk side, 3.003 lands branch-stable on
-// the block side and seam-matches whatever the block module builds from d=3.
 // ---------------------------------------------------------------------------
 const CURB_STATIONS = [0, 0.03, 0.07, 0.11, 0.15];
 const WALK_STATIONS = [0.15, 0.5, 1.0, 1.6, 2.3, 2.997, 3.003];
-const ALL_STATIONS = [0, 0.03, 0.07, 0.11, 0.15, 0.5, 1.0, 1.6, 2.3, 2.997, 3.003];
 const STEP_STRAIGHT = 0.4;
 const STEP_ARC = 0.12;
-const FILLET_C = CURB_FACE + CORNER_R; // curb-line fillet arc center offset (9.95)
 const NRM_EPS = 0.04;
 const EDGE_EPS = 0.0025;   // tight eps near d=3 so the plinth step doesn't smear normals
 
@@ -60,17 +65,6 @@ const CURB_V = (() => {
   }
   return v;
 })();
-function curbVOf(d) {
-  if (d <= 0) return 0;
-  if (d >= CURB_W) return CURB_V[CURB_V.length - 1];
-  for (let i = 1; i < CURB_STATIONS.length; i++) {
-    if (d <= CURB_STATIONS[i]) {
-      const f = (d - CURB_STATIONS[i - 1]) / (CURB_STATIONS[i] - CURB_STATIONS[i - 1]);
-      return CURB_V[i - 1] + (CURB_V[i] - CURB_V[i - 1]) * f;
-    }
-  }
-  return CURB_V[CURB_V.length - 1];
-}
 
 const _gn = { x: 0, y: 1, z: 0 }; // groundNormal scratch (build-time only)
 
@@ -101,7 +95,6 @@ class GeoBuilder {
     let cy = e1z * e2x - e1x * e2z;
     let cz = e1x * e2y - e1y * e2x;
     if (cx * cx + cy * cy + cz * cz < 1e-16) {
-      // first triangle degenerate (e.g. lathe center fan) — test the second
       e1x = p[e * 3] - ax; e1y = p[e * 3 + 1] - ay; e1z = p[e * 3 + 2] - az;
       cx = e2y * e1z - e2z * e1y;
       cy = e2z * e1x - e2x * e1z;
@@ -112,14 +105,6 @@ class GeoBuilder {
     const dot = cx * n[a * 3] + cy * n[a * 3 + 1] + cz * n[a * 3 + 2];
     if (dot <= 0) this.idx.push(a, c, d, a, d, e);
     else this.idx.push(a, d, c, a, e, d);
-  }
-  gridQuads(base, m, s) {
-    for (let i = 0; i + 1 < m; i++) {
-      for (let j = 0; j + 1 < s; j++) {
-        this.quad(base + i * s + j, base + (i + 1) * s + j,
-          base + (i + 1) * s + j + 1, base + i * s + j + 1);
-      }
-    }
   }
 }
 
@@ -146,8 +131,7 @@ function emitGroundVertex(b, x, z, d, u, v, isCurb) {
 // ---------------------------------------------------------------------------
 // Curb-line path construction. Path points sit exactly on the d=0 contour with
 // normals pointing toward increasing d (into the block); offsetting by d along
-// the normal reproduces the SDF contours exactly (straights are linear,
-// fillet-arc contours are concentric circles of radius CORNER_R - d).
+// the normal reproduces the SDF contours exactly.
 // ---------------------------------------------------------------------------
 function addStraight(pts, x0, z0, x1, z1, nx, nz, u0, skipFirst) {
   const dx = x1 - x0, dz = z1 - z0;
@@ -178,182 +162,71 @@ function addArc(pts, cx, cz, a0, a1, u0, skipFirst) {
   return u0 + alen;
 }
 
-function emitBand(qc, qw, pts) {
-  emitStrip(qc, pts, CURB_STATIONS, true);
-  emitStrip(qw, pts, WALK_STATIONS, false);
+/**
+ * Closed curb-line loop around block (ix, jz): 4 straights + 4 fillet arcs,
+ * cyclic S → E → N → W. E-W rows use their own curb face (motorways wider).
+ */
+function buildBlockLoop(ix, jz) {
+  const w = ix * PERIOD_X, e = (ix + 1) * PERIOD_X;
+  const s = jz * PERIOD_Z, n = (jz + 1) * PERIOD_Z;
+  const fS = rowFace(jz), fN = rowFace(jz + 1), fC = CURB_FACE;
+  const R = CORNER_R;
+  const sides = [
+    { x0: w + fC + R, z0: s + fS, x1: e - fC - R, z1: s + fS, nx: 0, nz: 1 },
+    { x0: e - fC, z0: s + fS + R, x1: e - fC, z1: n - fN - R, nx: -1, nz: 0 },
+    { x0: e - fC - R, z0: n - fN, x1: w + fC + R, z1: n - fN, nx: 0, nz: -1 },
+    { x0: w + fC, z0: n - fN - R, x1: w + fC, z1: s + fS + R, nx: 1, nz: 0 },
+  ];
+  const pts = [];
+  let u = 0;
+  for (let k = 0; k < 4; k++) {
+    const sd = sides[k];
+    u = addStraight(pts, sd.x0, sd.z0, sd.x1, sd.z1, sd.nx, sd.nz, u, pts.length > 0);
+    const nxt = sides[(k + 1) % 4];
+    const ccx = sd.x1 + sd.nx * R, ccz = sd.z1 + sd.nz * R;
+    const a0 = Math.atan2(sd.z1 - ccz, sd.x1 - ccx);
+    const a1 = Math.atan2(nxt.z0 - ccz, nxt.x0 - ccx);
+    u = addArc(pts, ccx, ccz, a0, a1, u, true);
+  }
+  return pts;
 }
 
-function emitStrip(b, pts, stations, isCurb) {
+/** Emit strip rows [from, to) plus the quads linking them to the prior row. */
+function emitRowsRange(b, stripBase, pts, from, to, stations, isCurb) {
   const s = stations.length;
-  const base = b.vcount();
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = from; i < to; i++) {
     const p = pts[i];
     for (let j = 0; j < s; j++) {
       const d = stations[j];
       emitGroundVertex(b, p.x + p.nx * d, p.z + p.nz * d, d, p.u, isCurb ? CURB_V[j] : d, isCurb);
     }
   }
-  b.gridQuads(base, pts.length, s);
-}
-
-function nearStreet(v, arr) {
-  for (let i = 0; i < arr.length; i++) if (Math.abs(v - arr[i]) < 0.75) return arr[i];
-  return null;
-}
-
-/**
- * One block's curb/sidewalk band. Sides in cyclic order S, E, N, W; sides that
- * face a street get a straight, street-street corners get the CORNER_R fillet
- * arc, sides that run out to a street dead-end terminate exactly on the
- * |x|=EXTENT_X / |z|=EXTENT_Z end line (the end assemblies continue from there).
- */
-function buildBlockBand(qc, qw, rect) {
-  const w = nearStreet(rect.x0 - SIDEWALK_EDGE, STREETS_X);
-  const e = nearStreet(rect.x1 + SIDEWALK_EDGE, STREETS_X);
-  const s = nearStreet(rect.z0 - SIDEWALK_EDGE, STREETS_Z);
-  const n = nearStreet(rect.z1 + SIDEWALK_EDGE, STREETS_Z);
-  const sides = [
-    s === null ? null : {
-      x0: w !== null ? w + FILLET_C : -EXTENT_X, z0: s + CURB_FACE,
-      x1: e !== null ? e - FILLET_C : EXTENT_X, z1: s + CURB_FACE, nx: 0, nz: 1,
-    },
-    e === null ? null : {
-      x0: e - CURB_FACE, z0: s !== null ? s + FILLET_C : -EXTENT_Z,
-      x1: e - CURB_FACE, z1: n !== null ? n - FILLET_C : EXTENT_Z, nx: -1, nz: 0,
-    },
-    n === null ? null : {
-      x0: e !== null ? e - FILLET_C : EXTENT_X, z0: n - CURB_FACE,
-      x1: w !== null ? w + FILLET_C : -EXTENT_X, z1: n - CURB_FACE, nx: 0, nz: -1,
-    },
-    w === null ? null : {
-      x0: w + CURB_FACE, z0: n !== null ? n - FILLET_C : EXTENT_Z,
-      x1: w + CURB_FACE, z1: s !== null ? s + FILLET_C : -EXTENT_Z, nx: 1, nz: 0,
-    },
-  ];
-  let count = 0;
-  for (let k = 0; k < 4; k++) if (sides[k]) count++;
-  if (count === 0) return;
-  const closed = count === 4;
-  let start = 0;
-  if (!closed) {
-    for (let k = 0; k < 4; k++) {
-      if (sides[k] && !sides[(k + 3) % 4]) { start = k; break; }
+  for (let i = Math.max(1, from); i < to; i++) {
+    for (let j = 0; j + 1 < s; j++) {
+      b.quad(stripBase + (i - 1) * s + j, stripBase + i * s + j,
+        stripBase + i * s + j + 1, stripBase + (i - 1) * s + j + 1);
     }
-  }
-  const pts = [];
-  let u = 0;
-  for (let step = 0; step < count; step++) {
-    const sd = sides[(start + step) % 4];
-    u = addStraight(pts, sd.x0, sd.z0, sd.x1, sd.z1, sd.nx, sd.nz, u, pts.length > 0);
-    if (step < count - 1 || closed) {
-      // next existing side is cyclically adjacent by construction
-      let m = (start + step + 1) % 4;
-      while (!sides[m]) m = (m + 1) % 4;
-      const nxt = sides[m];
-      const ccx = sd.x1 + sd.nx * CORNER_R, ccz = sd.z1 + sd.nz * CORNER_R;
-      const a0 = Math.atan2(sd.z1 - ccz, sd.x1 - ccx);
-      const a1 = Math.atan2(nxt.z0 - ccz, nxt.x0 - ccx);
-      u = addArc(pts, ccx, ccz, a0, a1, u, true);
-    }
-  }
-  emitBand(qc, qw, pts);
-}
-
-// ---------------------------------------------------------------------------
-// Street dead-ends. The SDF end cap is max(|t|-CURB_FACE, |along|-EXTENT), so
-// the sidewalk runs straight across the end and the two outer corners are
-// sharp with d = max(a, b) — meshed as tensor grids in (a, b) with the same
-// station spacing as the strips, so every shared edge is vertex-exact.
-// ---------------------------------------------------------------------------
-function buildEnd(qc, qw, axis, c, e) {
-  const pts = [];
-  if (axis === 0) {
-    addStraight(pts, c - CURB_FACE, e * EXTENT_Z, c + CURB_FACE, e * EXTENT_Z, 0, e, 0, false);
-  } else {
-    addStraight(pts, e * EXTENT_X, c - CURB_FACE, e * EXTENT_X, c + CURB_FACE, e, 0, 0, false);
-  }
-  emitBand(qc, qw, pts);
-  emitEndSkirt(qc, axis, c, e);
-  emitEndCorner(qc, qw, axis, c, e, -1);
-  emitEndCorner(qc, qw, axis, c, e, 1);
-}
-
-/**
- * Vertical asphalt-slab face across a dead end: groundHeight() drops from the
- * road crown to the gutter level at the cap line, and the road module's cap
- * edge may leave that face open. Placed 3 mm beyond the end line so it never
- * z-fights a road-side cap face if one exists.
- */
-function emitEndSkirt(b, axis, c, e) {
-  const n = Math.ceil((2 * CURB_FACE) / STEP_STRAIGHT);
-  const base = b.vcount();
-  for (let k = 0; k <= n; k++) {
-    const t = -CURB_FACE + (2 * CURB_FACE) * (k / n);
-    let x, z, xi, zi, nx, nz;
-    if (axis === 0) {
-      x = c + t; z = e * (EXTENT_Z + 0.003); xi = x; zi = e * (EXTENT_Z - 0.01); nx = 0; nz = e;
-    } else {
-      z = c + t; x = e * (EXTENT_X + 0.003); zi = z; xi = e * (EXTENT_X - 0.01); nx = e; nz = 0;
-    }
-    const yb = groundHeight(x, z);
-    let yt = groundHeight(xi, zi);
-    if (yt < yb + 0.001) yt = yb + 0.001;
-    b.vert(x, yb, z, nx, 0, nz, t, 0, 0.40, 0.395, 0.385);
-    b.vert(x, yt, z, nx, 0, nz, t, yt - yb, 0.62, 0.61, 0.595);
-  }
-  for (let k = 0; k < n; k++) {
-    b.quad(base + k * 2, base + (k + 1) * 2, base + (k + 1) * 2 + 1, base + k * 2 + 1);
   }
 }
 
-function emitEndCorner(bC, bW, axis, c, e, s) {
-  let ox, oz, axx, axz, bxx, bxz;
-  if (axis === 0) { ox = c + s * CURB_FACE; oz = e * EXTENT_Z; axx = 0; axz = e; bxx = s; bxz = 0; }
-  else { ox = e * EXTENT_X; oz = c + s * CURB_FACE; axx = e; axz = 0; bxx = 0; bxz = s; }
-  const st = ALL_STATIONS, ns = st.length;
-
-  // curb sub-square: d = max(a,b) < CURB_W ⇔ both a,b ≤ 0.15 (stations 0..4)
-  const baseC = bC.vcount();
-  for (let i = 0; i <= 4; i++) {
-    for (let j = 0; j <= 4; j++) {
-      const a = st[i], bb = st[j], d = Math.max(a, bb);
-      const x = ox + axx * a + bxx * bb, z = oz + axz * a + bxz * bb;
-      const y = groundHeight(x, z);
-      groundNormal(x, z, NRM_EPS, _gn);
-      const g = grimeAt(x, z, d, true);
-      bC.vert(x, y, z, _gn.x, _gn.y, _gn.z, a, curbVOf(d), g, g * 0.985, g * 0.955);
-    }
-  }
-  bC.gridQuads(baseC, 5, 5);
-
-  // sidewalk: full grid, indices only for cells outside the curb sub-square
-  const baseW = bW.vcount();
-  for (let i = 0; i < ns; i++) {
-    for (let j = 0; j < ns; j++) {
-      const a = st[i], bb = st[j], d = Math.max(a, bb);
-      const x = ox + axx * a + bxx * bb, z = oz + axz * a + bxz * bb;
-      const y = groundHeight(x, z);
-      groundNormal(x, z, d > 2.9 ? EDGE_EPS : NRM_EPS, _gn);
-      const g = grimeAt(x, z, d, false);
-      bW.vert(x, y, z, _gn.x, _gn.y, _gn.z, a, bb, g, g * 0.985, g * 0.955);
-    }
-  }
-  for (let i = 0; i + 1 < ns; i++) {
-    for (let j = 0; j + 1 < ns; j++) {
-      if (i < 4 && j < 4) continue;
-      bW.quad(baseW + i * ns + j, baseW + (i + 1) * ns + j,
-        baseW + (i + 1) * ns + j + 1, baseW + i * ns + j + 1);
-    }
+/** Cooperative block-band build: yields between row slices. */
+function* blockBandGen(qc, qw, ix, jz) {
+  const pts = buildBlockLoop(ix, jz);
+  const baseC = qc.vcount();
+  const baseW = qw.vcount();
+  let i = 0;
+  while (i < pts.length) {
+    const end = Math.min(pts.length, i + ROWS_PER_SLICE);
+    emitRowsRange(qc, baseC, pts, i, end, CURB_STATIONS, true);
+    emitRowsRange(qw, baseW, pts, i, end, WALK_STATIONS, false);
+    i = end;
+    yield;
   }
 }
 
 // ---------------------------------------------------------------------------
 // Manhole cover — lathe profile (r, y, grime), 48 segments. Machined rings and
-// a dark cover/frame gap groove; the rim stands ~9 mm proud and the outer
-// bevel buries itself in the asphalt. NOTE (deviation): the brief asks for the
-// cover 6 mm BELOW groundHeight, but the road mesh is continuous asphalt over
-// d<0 — anything below it is z-occluded and invisible. The relief is kept
-// (plate 6 mm below rim) with the whole assembly floated just proud instead.
+// a dark cover/frame gap groove; the rim stands ~9 mm proud.
 // ---------------------------------------------------------------------------
 const MH_PROFILE = [
   [0.000, 0.0020, 0.100, 0.0016, 1.00, 1.00],
@@ -372,8 +245,6 @@ const MH_PROFILE = [
   [0.350, 0.0052, 0.380, -0.0100, 0.85, 0.60],
 ];
 const MH_SEG = 48;
-const MH_FRAC = [0.32, 0.58, 0.44, 0.70, 0.26];
-const MH_T = [1.2, -2.8, 2.0, -1.2, 2.8, -2.0, 1.6, -2.4, 1.2, -2.8];
 
 function buildManholeGeometry(b) {
   for (let p = 0; p < MH_PROFILE.length; p++) {
@@ -397,9 +268,8 @@ function buildManholeGeometry(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Storm-drain grate 0.7×0.4, geometric slots (real depth, near-black floors)
-// so it reads as cast iron at 3 m. Long axis local +x; instances yaw 90° on
-// N-S streets. Top plane local y=0, apron edges bury below the asphalt.
+// Storm-drain grate 0.7×0.4, geometric slots (real depth, near-black floors).
+// Long axis local +x; instances yaw 90° on N-S streets.
 // ---------------------------------------------------------------------------
 const DR_SLOTS = [[-0.17, -0.13], [-0.095, -0.055], [-0.02, 0.02], [0.055, 0.095], [0.13, 0.17]];
 const DR_BARS = [[-0.13, -0.095], [-0.055, -0.02], [0.02, 0.055], [0.095, 0.13]];
@@ -417,17 +287,14 @@ function drQuad(b, pts, nx, ny, nz, g) {
 }
 
 function buildDrainGeometry(b) {
-  // frame top ring
   drQuad(b, [[-0.35, 0, 0.17], [0.35, 0, 0.17], [0.35, 0, 0.20], [-0.35, 0, 0.20]], 0, 1, 0, 1.0);
   drQuad(b, [[-0.35, 0, -0.20], [0.35, 0, -0.20], [0.35, 0, -0.17], [-0.35, 0, -0.17]], 0, 1, 0, 1.0);
   drQuad(b, [[-0.35, 0, -0.17], [-0.32, 0, -0.17], [-0.32, 0, 0.17], [-0.35, 0, 0.17]], 0, 1, 0, 1.0);
   drQuad(b, [[0.32, 0, -0.17], [0.35, 0, -0.17], [0.35, 0, 0.17], [0.32, 0, 0.17]], 0, 1, 0, 1.0);
-  // bars
   for (let i = 0; i < DR_BARS.length; i++) {
     const [z0, z1] = DR_BARS[i];
     drQuad(b, [[-0.32, 0, z0], [0.32, 0, z0], [0.32, 0, z1], [-0.32, 0, z1]], 0, 1, 0, 0.96);
   }
-  // slots: floor + four walls each
   for (let i = 0; i < DR_SLOTS.length; i++) {
     const [z0, z1] = DR_SLOTS[i];
     const yb = -DR_DEPTH;
@@ -437,7 +304,6 @@ function buildDrainGeometry(b) {
     drQuad(b, [[-0.32, yb, z0], [-0.32, yb, z1], [-0.32, 0, z1], [-0.32, 0, z0]], 1, 0, 0, 0.30);
     drQuad(b, [[0.32, yb, z0], [0.32, yb, z1], [0.32, 0, z1], [0.32, 0, z0]], -1, 0, 0, 0.30);
   }
-  // mitred apron ring, outer edge 22 mm down (buried in the asphalt)
   const ay = -0.022, an = 0.91, at = 0.41;
   drQuad(b, [[-0.35, 0, 0.20], [0.35, 0, 0.20], [0.40, ay, 0.25], [-0.40, ay, 0.25]], 0, an, at, 0.80);
   drQuad(b, [[-0.35, 0, -0.20], [0.35, 0, -0.20], [0.40, ay, -0.25], [-0.40, ay, -0.25]], 0, an, -at, 0.80);
@@ -446,8 +312,7 @@ function buildDrainGeometry(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Thin-instance matrix: local +y aligned to the ground normal, yaw around it,
-// det(+1) basis so winding is preserved. Row-major Babylon Matrix layout.
+// Thin-instance matrix: local +y aligned to the ground normal, yaw around it.
 // ---------------------------------------------------------------------------
 function writeInstance(buf, k, x, z, lift, yaw, eps) {
   const y = groundHeight(x, z) + lift;
@@ -467,19 +332,9 @@ function writeInstance(buf, k, x, z, lift, yaw, eps) {
   buf[o + 12] = x; buf[o + 13] = y; buf[o + 14] = z; buf[o + 15] = 1;
 }
 
-function mulberry32(a) {
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 // ---------------------------------------------------------------------------
-// Materials — PBRMaterial + vendored texture sets (chosen over a custom WGSL
-// ShaderMaterial so CSM shadows, the scene light loop, IBL-if-added and fog
-// come for free; see notes). Missing textures fail loudly magenta.
+// Materials — PBRMaterial + vendored texture sets. Missing textures fail
+// loudly magenta.
 // ---------------------------------------------------------------------------
 function makeTex(scene, url, tile, onErr) {
   const t = new Texture(url, scene, false, true, Texture.TRILINEAR_SAMPLINGMODE, null, onErr);
@@ -540,6 +395,8 @@ export class Curbs {
    */
   constructor(scene, env) {
     this.scene = scene;
+    /** bumped whenever meshes stream in/out (render-list refresh hook) */
+    this.generation = 0;
 
     this._matCurb = makePbrSet(scene, 'nlCurbConcrete', '/assets/textures/concrete/', 1 / 0.75, 0);
     this._matWalk = makePbrSet(scene, 'nlSidewalkPaving', '/assets/textures/paving/', 1 / 2.7, 0);
@@ -548,127 +405,212 @@ export class Curbs {
     this._matDrain = makePbrSet(scene, 'nlDrainIron', '/assets/textures/metal/', 1 / 0.4, 0.55);
     this._matWalk.bumpTexture.level = 0.9;
 
-    // --- annular curb/sidewalk grids, bucketed into 4 quadrant mesh pairs ---
-    const qCurb = [new GeoBuilder(), new GeoBuilder(), new GeoBuilder(), new GeoBuilder()];
-    const qWalk = [new GeoBuilder(), new GeoBuilder(), new GeoBuilder(), new GeoBuilder()];
-    const rects = blockRects();
-    for (let i = 0; i < rects.length; i++) {
-      const r = rects[i];
-      const q = (((r.x0 + r.x1) * 0.5 >= 0) ? 1 : 0) + (((r.z0 + r.z1) * 0.5 >= 0) ? 2 : 0);
-      buildBlockBand(qCurb[q], qWalk[q], r);
-    }
-    // all 12 street dead-ends (3 N-S streets × 2 + 3 E-W streets × 2)
-    for (let i = 0; i < STREETS_X.length; i++) {
-      for (let e = -1; e <= 1; e += 2) {
-        const q = ((STREETS_X[i] >= 0) ? 1 : 0) + ((e > 0) ? 2 : 0);
-        buildEnd(qCurb[q], qWalk[q], 0, STREETS_X[i], e);
-      }
-    }
-    for (let i = 0; i < STREETS_Z.length; i++) {
-      for (let e = -1; e <= 1; e += 2) {
-        const q = ((e > 0) ? 1 : 0) + ((STREETS_Z[i] >= 0) ? 2 : 0);
-        buildEnd(qCurb[q], qWalk[q], 1, STREETS_Z[i], e);
-      }
-    }
+    /** @type {Map<string, {mc: Mesh|null, mw: Mesh|null}>} */
+    this._blocks = new Map();
+    /** @type {Array<{key: string, ix: number, jz: number}>} */
+    this._queue = [];
+    this._task = null;   // {key, ix, jz, gen, qc, qw}
+    this._scanX = Infinity; this._scanZ = Infinity;
+    this._instX = Infinity; this._instZ = Infinity;
 
-    /** All meshes owned by this module (integrator convenience: shadow wiring). */
-    this.meshes = [];
-    for (let q = 0; q < 4; q++) {
-      const mc = finalizeMesh(scene, 'nlCurb_q' + q, qCurb[q], this._matCurb);
-      const mw = finalizeMesh(scene, 'nlSidewalk_q' + q, qWalk[q], this._matWalk);
-      if (mc) this.meshes.push(mc);
-      if (mw) this.meshes.push(mw);
-    }
-
-    // --- manhole covers: one mesh, 10 thin instances on the carriageway ---
+    // manhole + drain masters (instance buffers rebuilt per region)
     {
       const b = new GeoBuilder();
       buildManholeGeometry(b);
-      const mesh = finalizeMesh(scene, 'nlManhole', b, this._matManhole);
-      const rng = mulberry32(20260731);
-      const segs = streetSegments();
-      const buf = new Float32Array(10 * 16);
-      let k = 0;
-      for (let i = 0; i < segs.length && k < 10; i++) {
-        const sg = segs[i];
-        if (sg.s1 - sg.s0 < 50) continue;   // long mid-block segments only
-        const s = sg.s0 + (sg.s1 - sg.s0) * MH_FRAC[k % MH_FRAC.length];
-        const t = MH_T[k % MH_T.length];    // lane offsets, several in the wheel path
-        const x = sg.axis === 0 ? sg.center + t : s;
-        const z = sg.axis === 0 ? s : sg.center + t;
-        writeInstance(buf, k, x, z, 0.004, rng() * Math.PI * 2, 0.25);
-        k++;
-      }
-      mesh.thinInstanceSetBuffer('matrix', buf.subarray(0, k * 16), 16, true);
-      mesh.thinInstanceRefreshBoundingInfo();
-      this.meshes.push(mesh);
-      this._manholes = mesh;
+      this._manholes = finalizeMesh(scene, 'nlManhole', b, this._matManhole);
+      this._manholes.alwaysSelectAsActiveMesh = true;
+      this._manholes.metadata = { nlNoShadow: true };
     }
-
-    // --- storm drains: one mesh, 4 per intersection in the gutters ---
     {
       const b = new GeoBuilder();
       buildDrainGeometry(b);
-      const mesh = finalizeMesh(scene, 'nlDrain', b, this._matDrain);
-      const its = intersections();
-      const buf = new Float32Array(its.length * 4 * 16);
-      let k = 0;
-      for (let i = 0; i < its.length; i++) {
-        const it = its[i];
-        for (let sx = -1; sx <= 1; sx += 2) {
-          for (let sz = -1; sz <= 1; sz += 2) {
-            const onNS = sx * sz > 0;      // alternate arms around each corner
-            const x = onNS ? it.x + sx * 4.2 : it.x + sx * 10.85;
-            const z = onNS ? it.z + sz * 10.85 : it.z + sz * 4.2;
-            writeInstance(buf, k, x, z, 0.010, onNS ? Math.PI / 2 : 0, 0.2);
-            k++;
-          }
-        }
-      }
-      mesh.thinInstanceSetBuffer('matrix', buf, 16, true);
-      mesh.thinInstanceRefreshBoundingInfo();
-      this.meshes.push(mesh);
-      this._drains = mesh;
+      this._drains = finalizeMesh(scene, 'nlDrain', b, this._matDrain);
+      this._drains.alwaysSelectAsActiveMesh = true;
+      this._drains.metadata = { nlNoShadow: true };
     }
 
     if (env) this.applyEnvironment(env);
   }
 
+  _rescan(cx, cz) {
+    this._scanX = cx; this._scanZ = cz;
+    for (const bl of blocksInRegion(cx - R_BUILD, cx + R_BUILD, cz - R_BUILD, cz + R_BUILD)) {
+      const key = `${bl.ix}:${bl.jz}`;
+      if (this._blocks.has(key)) continue;
+      const bcx = (bl.x0 + bl.x1) * 0.5, bcz = (bl.z0 + bl.z1) * 0.5;
+      const hx = (bl.x1 - bl.x0) * 0.5 + 8, hz = (bl.z1 - bl.z0) * 0.5 + 8;
+      const dx = Math.max(0, Math.abs(cx - bcx) - hx);
+      const dz = Math.max(0, Math.abs(cz - bcz) - hz);
+      if (Math.hypot(dx, dz) > R_BUILD) continue;
+      this._blocks.set(key, null); // reserved: queued
+      this._queue.push({ key, ix: bl.ix, jz: bl.jz });
+    }
+    // evict far blocks
+    for (const [key, entry] of this._blocks) {
+      if (this._task && this._task.key === key) continue;
+      const [ix, jz] = key.split(':').map(Number);
+      const bcx = (ix + 0.5) * PERIOD_X, bcz = (jz + 0.5) * PERIOD_Z;
+      const hx = PERIOD_X * 0.5 + 8, hz = PERIOD_Z * 0.5 + 8;
+      const dx = Math.max(0, Math.abs(cx - bcx) - hx);
+      const dz = Math.max(0, Math.abs(cz - bcz) - hz);
+      if (Math.hypot(dx, dz) > R_DROP) {
+        if (entry) {
+          if (entry.mc) entry.mc.dispose(false, false);
+          if (entry.mw) entry.mw.dispose(false, false);
+          this.generation++;
+        }
+        this._blocks.delete(key);
+      }
+    }
+  }
+
+  _rebuildInstances(cx, cz) {
+    this._instX = cx; this._instZ = cz;
+    // manholes: hashed per street segment, wheel-path lane offsets
+    {
+      const items = [];
+      for (const seg of segmentsInRegion(cx - R_INST, cx + R_INST, cz - R_INST, cz + R_INST)) {
+        if (seg.mway) continue;                       // none on the motorway
+        const len = seg.s1 - seg.s0;
+        if (len < 40) continue;
+        const h0 = cellSeed(seg.axis * 7919 + seg.line, Math.round(seg.s0), 3);
+        const nMh = h0 < 0.55 ? 1 : 0;
+        for (let k = 0; k < nMh; k++) {
+          const hs = cellSeed(seg.axis * 7919 + seg.line, Math.round(seg.s0), 11 + k);
+          const ht = cellSeed(seg.axis * 7919 + seg.line, Math.round(seg.s0), 17 + k);
+          const s = seg.s0 + len * (0.18 + 0.64 * hs);
+          const t = (ht > 0.5 ? 1 : -1) * (1.2 + (ht * 7919 % 1) * 1.6);
+          const x = seg.axis === 0 ? seg.center + t : s;
+          const z = seg.axis === 0 ? s : seg.center + t;
+          items.push({ x, z, yaw: hs * Math.PI * 2 });
+        }
+      }
+      const buf = new Float32Array(Math.max(1, items.length) * 16);
+      for (let i = 0; i < items.length; i++) {
+        writeInstance(buf, i, items[i].x, items[i].z, 0.004, items[i].yaw, 0.25);
+      }
+      if (items.length > 0) {
+        this._manholes.thinInstanceSetBuffer('matrix', buf.subarray(0, items.length * 16), 16, true);
+        this._manholes.thinInstanceRefreshBoundingInfo();
+      }
+      this._manholes.setEnabled(items.length > 0);
+    }
+    // drains: 4 per crossing in the gutters, generalised for wide rows
+    {
+      const crossings = crossingsInRegion(cx - R_INST, cx + R_INST, cz - R_INST, cz + R_INST);
+      const buf = new Float32Array(Math.max(1, crossings.length * 4) * 16);
+      let k = 0;
+      for (const it of crossings) {
+        const fB = rowFace(it.j);
+        for (let sx = -1; sx <= 1; sx += 2) {
+          for (let sz = -1; sz <= 1; sz += 2) {
+            const onNS = sx * sz > 0;      // alternate arms around each corner
+            const x = onNS ? it.x + sx * (CURB_FACE - 0.25) : it.x + sx * (CURB_FACE + CORNER_R + 0.9);
+            const z = onNS ? it.z + sz * (fB + CORNER_R + 0.9) : it.z + sz * (fB - 0.25);
+            writeInstance(buf, k, x, z, 0.010, onNS ? Math.PI / 2 : 0, 0.2);
+            k++;
+          }
+        }
+      }
+      if (k > 0) {
+        this._drains.thinInstanceSetBuffer('matrix', buf.subarray(0, k * 16), 16, true);
+        this._drains.thinInstanceRefreshBoundingInfo();
+      }
+      this._drains.setEnabled(k > 0);
+    }
+  }
+
+  _finishTask() {
+    const t = this._task;
+    const mc = finalizeMesh(this.scene, `nlCurb_${t.key}`, t.qc, this._matCurb);
+    const mw = finalizeMesh(this.scene, `nlSidewalk_${t.key}`, t.qw, this._matWalk);
+    this._blocks.set(t.key, { mc, mw });
+    this._task = null;
+    this.generation++;
+  }
+
+  /** Per-frame streaming under the shared build budget. Allocation-light. */
+  update(dt, camX, camZ) {
+    if (Math.hypot(camX - this._scanX, camZ - this._scanZ) > RESCAN_DIST) {
+      this._rescan(camX, camZ);
+    }
+    if (Math.hypot(camX - this._instX, camZ - this._instZ) > INST_RESCAN) {
+      this._rebuildInstances(camX, camZ);
+    }
+
+    const deadline = buildBudget.deadline();
+    if (performance.now() >= deadline) return;
+    const t0 = performance.now();
+
+    while (performance.now() < deadline) {
+      if (!this._task) {
+        const next = this._queue.shift();
+        if (!next) break;
+        if (this._blocks.get(next.key) !== null) continue; // evicted while queued
+        this._task = {
+          key: next.key, ix: next.ix, jz: next.jz,
+          qc: new GeoBuilder(), qw: new GeoBuilder(),
+          gen: null,
+        };
+        this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz);
+      }
+      if (this._task.gen.next().done) this._finishTask();
+    }
+    buildBudget.report(performance.now() - t0);
+  }
+
+  /** Build every queued block synchronously (loading-screen warmup). */
+  prewarm(camX, camZ) {
+    this._rescan(camX, camZ);
+    this._rebuildInstances(camX, camZ);
+    let next;
+    while ((next = this._queue.shift())) {
+      if (this._blocks.get(next.key) !== null) continue;
+      this._task = {
+        key: next.key, ix: next.ix, jz: next.jz,
+        qc: new GeoBuilder(), qw: new GeoBuilder(), gen: null,
+      };
+      this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz);
+      while (!this._task.gen.next().done) { /* run to completion */ }
+      this._finishTask();
+    }
+  }
+
   /**
-   * Weather push. Wetness darkens albedo and tightens roughness (multiplier on
-   * the roughness texture); the curb/gutter splash zone reacts strongest.
-   * Materials are intentionally left unfrozen: uniforms change on every apply
-   * and shadow/light wiring by the integrator may happen after construction.
+   * Weather push. Wetness darkens albedo and tightens roughness; the
+   * curb/gutter splash zone reacts strongest.
    */
   applyEnvironment(env) {
     const p = env.params;
     let w = p.wetnessTarget + p.rainRate * 0.25;
     if (w < 0) w = 0; else if (w > 1) w = 1;
+    // Night response: the pale paving scan reads far too bright under dark
+    // skies (the PBR band gets no streetlight point lights), so albedo tracks
+    // the ambient level — sidewalks sink into the dark instead of glowing.
+    const amb = Math.min(1, Math.max(0, p.ambientIntensity));
+    const dim = 0.32 + 0.68 * amb * amb;
     const mw = this._matWalk, mc = this._matCurb, mm = this._matManhole, md = this._matDrain;
     if (!mw.unlit) {
       mw.roughness = 1 - 0.40 * w;
-      const s = 1 - 0.20 * w;
+      const s = (1 - 0.20 * w) * dim;
       mw.albedoColor.copyFromFloats(0.94 * s, 0.94 * s, 0.93 * s);
     }
     if (!mc.unlit) {
       mc.roughness = 1 - 0.52 * w;
-      const s = 1 - 0.30 * w;
+      const s = (1 - 0.30 * w) * dim;
       mc.albedoColor.copyFromFloats(0.88 * s, 0.88 * s, 0.87 * s);
     }
     if (!mm.unlit) {
       mm.roughness = 1 - 0.55 * w;
-      const s = 1 - 0.25 * w;
+      const s = (1 - 0.25 * w) * dim;
       mm.albedoColor.copyFromFloats(0.62 * s, 0.63 * s, 0.66 * s);
     }
     if (!md.unlit) {
       md.roughness = 1 - 0.50 * w;
-      const s = 1 - 0.20 * w;
+      const s = (1 - 0.20 * w) * dim;
       md.albedoColor.copyFromFloats(0.30 * s, 0.31 * s, 0.33 * s);
     }
   }
-
-  /** Everything is static — nothing to do per frame. Allocation-free. */
-  update(dt, camX, camZ) { } // eslint-disable-line no-unused-vars
 
   /** All pipeline variants are plain PBR; nothing extra to touch. */
   warmup() { }

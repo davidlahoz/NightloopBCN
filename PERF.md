@@ -53,3 +53,23 @@ idle and are not app work.
 - Headless captures include a benign one-frame "Destroyed texture used in a
   submit" warning at boot (swapchain teardown race in headless present); not
   observed to affect steady state.
+
+## Endless city streaming (post-rework)
+
+Measured on the dev machine (M-series, medium preset, 2560×1440 headless):
+
+- 45 s full-throttle drive (~1.2 km): worst sim frame 5.3 ms, worst render
+  11.6 ms, worst incremental build slice 4.8 ms. 35 s motorway drive
+  (~0.9 km): worst sim 5.8 ms, worst build 3.6 ms. No hitches, holes or
+  pop-in observed at 100 km/h.
+- All streamers (road chunks, curb bands, building blocks) share ONE
+  ~3 ms/frame build budget (`src/core/buildBudget.js`); road chunks slice by
+  grid rows, curbs by path rows (generator), buildings by whole building
+  (generator). Rescan/rebuild cadences are deliberately staggered
+  (22/24/26/44/52 m) so region rebuilds never stack in one frame.
+- Working set stays bounded while driving: ~260–280 road chunks, ~380–410
+  scene meshes, ~190 streetlight instances; far cells are disposed
+  (roads > 470 m, buildings > 384 m, curbs > 340 m). Memory is flat over
+  distance.
+- The road light storage buffer holds the 72–96 nearest emitters (sorted per
+  region rebuild); halo geometry rebuilds on the same event, a few kB.

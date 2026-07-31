@@ -33,11 +33,31 @@ export class Glow {
     mat.alphaMode = Constants.ALPHA_ADD;
     this.material = mat;
 
+    const mesh = new Mesh('nlGlow', scene);
+    mesh.material = mat;
+    mesh.isPickable = false;
+    mesh.alwaysSelectAsActiveMesh = true;
+    mesh.metadata = { nlNoShadow: true, nlNoMirror: true };
+    this.mesh = mesh;
+    this.rebuild(streetHeads, neons);
+
+    mat.setFloat('fogDensity', 0.003);
+    mat.setFloat('streetlight', 1);
+    mat.setFloat('neon', 1);
+    mat.setFloat('time', 0);
+  }
+
+  /**
+   * Regenerate all halo quads. Called whenever the streamed light sets change
+   * (a few times per block of driving — full re-upload is a few kB).
+   */
+  rebuild(streetHeads, neons) {
     const items = [];
     for (const h of streetHeads) items.push({ ...h, size: 1.35, neon: 0 });
     for (const n of neons) items.push({ ...n, size: 1.0, neon: 1 });
 
     const nQ = items.length;
+    if (nQ === 0) { this.mesh.setEnabled(false); return; }
     const pos = new Float32Array(nQ * 4 * 3);
     const center = new Float32Array(nQ * 4 * 3);
     const tint = new Float32Array(nQ * 4 * 4);
@@ -57,24 +77,14 @@ export class Glow {
       idx[j] = b; idx[j + 1] = b + 1; idx[j + 2] = b + 2;
       idx[j + 3] = b; idx[j + 4] = b + 2; idx[j + 5] = b + 3;
     }
-    const mesh = new Mesh('nlGlow', scene);
     const vd = new VertexData();
     vd.positions = pos;
     vd.indices = idx;
-    vd.applyToMesh(mesh);
-    mesh.setVerticesData('center', center, false, 3);
-    mesh.setVerticesData('tint', tint, false, 4);
-    mesh.setVerticesData('misc', misc, false, 4);
-    mesh.material = mat;
-    mesh.isPickable = false;
-    mesh.alwaysSelectAsActiveMesh = true;
-    mesh.metadata = { nlNoShadow: true, nlNoMirror: true };
-    this.mesh = mesh;
-
-    mat.setFloat('fogDensity', 0.003);
-    mat.setFloat('streetlight', 1);
-    mat.setFloat('neon', 1);
-    mat.setFloat('time', 0);
+    vd.applyToMesh(this.mesh);
+    this.mesh.setVerticesData('center', center, false, 3);
+    this.mesh.setVerticesData('tint', tint, false, 4);
+    this.mesh.setVerticesData('misc', misc, false, 4);
+    this.mesh.setEnabled(true);
   }
 
   applyEnvironment(env) {

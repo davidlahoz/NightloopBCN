@@ -1,18 +1,17 @@
 /**
- * NIGHTLOOP street props — streetlights, traffic signals, bollards,
- * street-end closures (Jersey barriers + striped boards), dumpsters.
+ * NIGHTLOOP street props — streetlights, traffic signals, bollards, motorway
+ * median barriers, dumpsters. The city is endless, so every prop kind is a
+ * thin-instanced master mesh whose instance buffer is REBUILT from the
+ * periodic plan every ~48 m of car travel (placement is deterministic per
+ * street segment / crossing / block, so revisited places look identical).
  *
- * Everything is built once in the constructor, merged per material, thin
- * instanced for repeats and frozen. 10 draw calls total:
- *   1 streetlight steel (thin inst)     2 streetlight lens (thin inst)
- *   3 signal steel (merged static)      4 signal red lenses
- *   5 signal green lenses               6 signal dark lenses
- *   7 bollards (thin inst)              8 Jersey barriers (thin inst)
- *   9 barrier boards (thin inst)       10 dumpsters (thin inst)
+ * Draw calls: lamp steel, lamp lens, signal steel, signal red/green/dark
+ * lenses, bollards, Jersey barriers, dumpsters = 9 total.
  *
  * All emissives are scaled through applyEnvironment(env) from
  * env.params.streetlightIntensity. getStreetlightHeads() exposes the sodium
- * head positions/colours for the deferred street-lighting integrator.
+ * head positions/colours for the road-shader light buffer; the list changes
+ * on rebuild (watch lightsGen).
  */
 import '@babylonjs/core/Meshes/thinInstanceMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
@@ -26,35 +25,34 @@ import { CreateLathe } from '@babylonjs/core/Meshes/Builders/latheBuilder.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
-import { Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import {
-  STREETS_X, STREETS_Z, CURB_FACE, EXTENT_X, EXTENT_Z, CORNER_R,
-  streetSegments,
+  CURB_FACE, CORNER_R, PERIOD_X, PERIOD_Z,
+  rowFace, rowSwEdge, rowIsMotorway, segmentsInRegion, crossingsInRegion,
+  blocksInRegion, cellSeed, SIDEWALK_EDGE,
 } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { hash2, fbm3, valueNoise } from './noise.js';
 
 const DEG = Math.PI / 180;
 
+const R_PROPS = 300;              // instancing radius
+const RESCAN_DIST = 52;           // offset vs other streamers: rebuilds don't stack
+
 // -- streetlights ------------------------------------------------------------
 const POLE_H = 7.5;
 const LIGHT_SPACING = 24;
-const LIGHT_LATERAL = CURB_FACE + 0.55;   // 0.55 m behind the curb face
 const SODIUM_R = 1.0, SODIUM_G = 0.72, SODIUM_B = 0.38;
 const HEAD_RADIUS = 22;
 const HEAD_LOCAL_X = 1.62;                // lens centre in pole-local space
 const HEAD_LOCAL_Y = 7.46;
 const LENS_BASE_EMISSIVE = 3.5;
 const SIGNAL_BASE_EMISSIVE = 2.4;
-
-// -- traffic signals ---------------------------------------------------------
-const SIG_DIAG = 7.33;                    // corner pole diagonal offset (sidewalk arc)
+const SIG_INSET = 2.62;                   // corner pole pull-in from the fillet arc
 
 // ---------------------------------------------------------------------------
-// crisp-edged prism: extrudes a closed 2D profile (CCW, [x, y] pairs) along Z,
-// duplicated verts per face for hard edges. Winding is verified against the
-// analytic outward normal and flipped if the engine convention differs.
+// crisp-edged prism: extrudes a closed 2D profile (CCW, [x, y] pairs) along Z.
 function prism(name, scene, profile, length, caps, uScale, vScale) {
   const n = profile.length;
   const pos = [], uvs = [], idx = [];
@@ -131,14 +129,6 @@ function chamferRect(w, d, c) {
   ];
 }
 
-/** yaw-rotate a part's local offset around (px, pz) and orient it. Keeps any
- *  pre-set rotation.x as local pitch (Babylon applies pitch before yaw). */
-function placeRot(mesh, lx, ly, lz, yaw, px, py, pz) {
-  const c = Math.cos(yaw), s = Math.sin(yaw);
-  mesh.rotation.y = yaw;
-  mesh.position.set(px + lx * c + lz * s, py + ly, pz - lx * s + lz * c);
-}
-
 /** RotationY * Translation into a thin-instance matrix slot. */
 function writeYawT(f32, off, yaw, x, y, z) {
   const c = Math.cos(yaw), s = Math.sin(yaw);
@@ -152,15 +142,32 @@ function finalize(mesh, mat) {
   mesh.material = mat;
   mesh.isPickable = false;
   mesh.doNotSyncBoundingInfo = true;
-  mesh.alwaysSelectAsActiveMesh = true;   // props span the map; skip culling test
+  mesh.alwaysSelectAsActiveMesh = true;   // props span the region; skip culling test
   mesh.freezeWorldMatrix();
   return mesh;
 }
 
-// ---------------------------------------------------------------------------
-// procedural build-time textures (texture sets are not vendored yet, and props
-// only need subtle breakup, so everything here is generated once on a canvas)
+/** Push {x,z,yaw} onto a list. */
+function it(list, x, z, yaw) { list.push({ x, z, yaw }); }
 
+/** Bake an {x,z,yaw} list into a fresh instance buffer on a master mesh. */
+function setInstances(mesh, list, lift) {
+  if (list.length === 0) {
+    mesh.setEnabled(false);
+    return;
+  }
+  const f = new Float32Array(list.length * 16);
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    writeYawT(f, i * 16, p.yaw, p.x, groundHeight(p.x, p.z) + lift, p.z);
+  }
+  mesh.thinInstanceSetBuffer('matrix', f, 16, true);
+  mesh.thinInstanceRefreshBoundingInfo();
+  mesh.setEnabled(true);
+}
+
+// ---------------------------------------------------------------------------
+// procedural build-time textures
 function fillNoise(tex, base, amp, scale, speckle) {
   const size = tex.getSize().width;
   const ctx = tex.getContext();
@@ -188,44 +195,6 @@ function makeNoiseTexture(scene, name, base, amp, scale, speckle) {
   return tex;
 }
 
-/** red/white diagonal stripes in v 0..0.72, grey steel band in v 0.78..1. */
-function makeStripeTexture(scene, name, emissive) {
-  const W = 256, H = 128;
-  const tex = new DynamicTexture(name, { width: W, height: H }, scene, true);
-  const ctx = tex.getContext();
-  const img = ctx.createImageData(W, H);
-  const d = img.data;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      let r, g, b;
-      if (y < 92) {
-        const red = (Math.floor((x + y) / 26) & 1) === 0;
-        const dirt = (valueNoise(x * 0.09, y * 0.09) - 0.5) * 24;
-        if (emissive) { r = red ? 235 : 0; g = red ? 34 : 0; b = red ? 22 : 0; }
-        else if (red) { r = 196 + dirt; g = 36 + dirt * 0.4; b = 30 + dirt * 0.4; }
-        else { r = 228 + dirt; g = 226 + dirt; b = 220 + dirt; }
-      } else if (emissive) {
-        r = 0; g = 0; b = 0;
-      } else {
-        const n = (valueNoise(x * 0.2, y * 0.2) - 0.5) * 18;
-        r = 96 + n; g = 98 + n; b = 100 + n;
-      }
-      d[i] = r < 0 ? 0 : r > 255 ? 255 : r;
-      d[i + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
-      d[i + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
-      d[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  tex.update(false);
-  tex.anisotropicFilteringLevel = 4;
-  return tex;
-}
-
-const STRIPE_UV = new Vector4(0, 0, 1, 0.72);
-const GREY_UV = new Vector4(0.05, 0.80, 0.45, 0.98);
-
 // ---------------------------------------------------------------------------
 
 export class Props {
@@ -237,6 +206,10 @@ export class Props {
     this.scene = scene;
     /** @type {Array<{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,intensity:number}>} */
     this._heads = [];
+    /** bumped whenever the streetlight head list changes */
+    this.lightsGen = 0;
+    this._si = 1;
+    this._scanX = Infinity; this._scanZ = Infinity;
 
     // shared build-time textures
     const roughTex = makeNoiseTexture(scene, 'nlPropRough', 190, 46, 0.085, false);
@@ -287,15 +260,6 @@ export class Props {
     concrete.roughness = 0.95;
     this._concreteMat = concrete;
 
-    const stripe = new PBRMaterial('nlPropStripe', scene);
-    stripe.albedoTexture = makeStripeTexture(scene, 'nlPropStripeA', false);
-    stripe.emissiveTexture = makeStripeTexture(scene, 'nlPropStripeE', true);
-    stripe.emissiveColor.copyFromFloats(1, 1, 1);
-    stripe.emissiveIntensity = 0;
-    stripe.metallic = 0.1;
-    stripe.roughness = 0.5;
-    this._stripeMat = stripe;
-
     const dgreen = new PBRMaterial('nlPropDumpster', scene);
     dgreen.albedoColor.copyFromFloats(0.036, 0.105, 0.052); // deep green
     dgreen.albedoTexture = mottleTex;
@@ -307,12 +271,12 @@ export class Props {
     dgreen.useMetallnessFromMetallicTextureBlue = true;
     this._dumpsterMat = dgreen;
 
-    // -- geometry -----------------------------------------------------------
-    this._buildStreetlights(scene);
-    this._buildSignals(scene);
-    this._buildBollards(scene);
-    this._buildClosures(scene);
-    this._buildDumpsters(scene);
+    // -- master meshes ------------------------------------------------------
+    this._buildLampMasters(scene);
+    this._buildSignalMasters(scene);
+    this._buildBollardMaster(scene);
+    this._buildJerseyMaster(scene);
+    this._buildDumpsterMaster(scene);
 
     this.applyEnvironment(env);
 
@@ -323,8 +287,8 @@ export class Props {
     dgreen.freeze();
   }
 
-  // -- streetlights ---------------------------------------------------------
-  _buildStreetlights(scene) {
+  // -- masters ---------------------------------------------------------------
+  _buildLampMasters(scene) {
     const parts = [];
 
     const plinth = CreateCylinder('nlLpPlinth', {
@@ -388,8 +352,8 @@ export class Props {
     cell.position.set(1.33, 7.70, 0);
     parts.push(cell);
 
-    const lampMaster = Mesh.MergeMeshes(parts, true, true);
-    lampMaster.name = 'nlStreetlights';
+    this._lampMaster = Mesh.MergeMeshes(parts, true, true);
+    this._lampMaster.name = 'nlStreetlights';
 
     // domed underside sodium lens (separate emissive mesh, same instance buffer)
     const lensMaster = CreateSphere('nlStreetlightLens', { diameter: 1, segments: 10, slice: 0.5 }, scene);
@@ -397,56 +361,13 @@ export class Props {
     lensMaster.rotation.x = Math.PI;                 // dome faces down
     lensMaster.position.set(HEAD_LOCAL_X, 7.492, 0);
     lensMaster.bakeCurrentTransformIntoVertices();
+    this._lensMaster = lensMaster;
 
-    // placement: every ~24 m along every segment, alternating sides, clear of
-    // intersection corners (arc reach ~9.95 m from cross centerline) and ends
-    const items = [];
-    const segs = streetSegments();
-    let k = 0;
-    for (let sI = 0; sI < segs.length; sI++) {
-      const seg = segs[sI];
-      const extent = seg.axis === 0 ? EXTENT_Z : EXTENT_X;
-      const mA = seg.s0 <= -extent + 0.5 ? 5.5 : CORNER_R + 0.4;
-      const mB = seg.s1 >= extent - 0.5 ? 5.5 : CORNER_R + 0.4;
-      const a = seg.s0 + mA, b = seg.s1 - mB;
-      if (b - a < 4) continue;
-      const nL = Math.max(1, Math.round((b - a) / LIGHT_SPACING));
-      const step = (b - a) / nL;
-      for (let i = 0; i < nL; i++) {
-        const s = a + step * (i + 0.5);
-        const side = (k & 1) === 0 ? 1 : -1;
-        k++;
-        if (seg.axis === 0) {
-          items.push({ x: seg.center + side * LIGHT_LATERAL, z: s, yaw: side > 0 ? Math.PI : 0 });
-        } else {
-          items.push({ x: s, z: seg.center + side * LIGHT_LATERAL, yaw: side > 0 ? Math.PI / 2 : -Math.PI / 2 });
-        }
-      }
-    }
-
-    const f = new Float32Array(items.length * 16);
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      const y = groundHeight(it.x, it.z) - 0.02;
-      writeYawT(f, i * 16, it.yaw, it.x, y, it.z);
-      const c = Math.cos(it.yaw), s = Math.sin(it.yaw);
-      this._heads.push({
-        x: it.x + HEAD_LOCAL_X * c,
-        y: y + HEAD_LOCAL_Y,
-        z: it.z - HEAD_LOCAL_X * s,
-        r: SODIUM_R, g: SODIUM_G, b: SODIUM_B,
-        radius: HEAD_RADIUS,
-        intensity: 1,
-      });
-    }
-    lampMaster.thinInstanceSetBuffer('matrix', f, 16, true);
-    lensMaster.thinInstanceSetBuffer('matrix', f, 16, true);
-    finalize(lampMaster, this._steelMat);
-    finalize(lensMaster, this._lensMat);
+    finalize(this._lampMaster, this._steelMat);
+    finalize(this._lensMaster, this._lensMat);
   }
 
-  // -- traffic signals at the central intersection --------------------------
-  _buildSignals(scene) {
+  _buildSignalMasters(scene) {
     // hood: half-annulus profile extruded along the facing axis
     const visorProfile = [];
     for (let i = 0; i <= 12; i++) {
@@ -458,78 +379,57 @@ export class Props {
       visorProfile.push([Math.cos(a2) * 0.142, Math.sin(a2) * 0.142]);
     }
 
-    const defs = [
-      { px: SIG_DIAG, pz: SIG_DIAG, yaw: Math.PI, green: true },        // faces -z
-      { px: -SIG_DIAG, pz: -SIG_DIAG, yaw: 0, green: true },            // faces +z
-      { px: -SIG_DIAG, pz: SIG_DIAG, yaw: Math.PI / 2, green: false },  // faces +x
-      { px: SIG_DIAG, pz: -SIG_DIAG, yaw: -Math.PI / 2, green: false }, // faces -x
-    ];
-
-    const steelParts = [], redParts = [], greenParts = [], darkParts = [];
-    for (let di = 0; di < defs.length; di++) {
-      const d = defs[di];
-      const gy = groundHeight(d.px, d.pz) - 0.02;
-
-      const collar = CreateCylinder('nlSgCol', { height: 0.28, diameterBottom: 0.22, diameterTop: 0.17, tessellation: 14 }, scene);
-      placeRot(collar, 0, 0.14, 0, d.yaw, d.px, gy, d.pz);
-      steelParts.push(collar);
-
-      const pole = CreateCylinder('nlSgPole', { height: 3.75, diameterBottom: 0.15, diameterTop: 0.11, tessellation: 14 }, scene);
-      placeRot(pole, 0, 1.875, 0, d.yaw, d.px, gy, d.pz);
-      steelParts.push(pole);
-
-      const cap = CreateSphere('nlSgCap', { diameter: 0.125, segments: 8, slice: 0.5 }, scene);
-      placeRot(cap, 0, 3.75, 0, d.yaw, d.px, gy, d.pz);
-      steelParts.push(cap);
-
-      const bracket = CreateBox('nlSgBr', { width: 0.10, height: 0.56, depth: 0.18 }, scene);
-      placeRot(bracket, 0, 2.95, 0.08, d.yaw, d.px, gy, d.pz);
-      steelParts.push(bracket);
-
-      const housing = CreateBox('nlSgHouse', { width: 0.36, height: 1.04, depth: 0.27 }, scene);
-      placeRot(housing, 0, 2.95, 0.21, d.yaw, d.px, gy, d.pz);
-      steelParts.push(housing);
-
-      // lamps top->bottom: red 3.25, amber 2.95, green 2.65
-      for (let j = 0; j < 3; j++) {
-        const ly = 3.25 - j * 0.3;
-        const lit = d.green ? j === 2 : j === 0;
-
-        const ring = CreateCylinder('nlSgRing', { height: 0.06, diameter: 0.27, tessellation: 18 }, scene);
-        ring.rotation.x = Math.PI / 2;
-        placeRot(ring, 0, ly, 0.35, d.yaw, d.px, gy, d.pz);
-        steelParts.push(ring);
-
-        const visor = prism('nlSgVisor', scene, visorProfile, 0.26, false, 1, 1);
-        visor.rotation.x = 0.18;                     // hood tips forward-down
-        placeRot(visor, 0, ly + 0.028, 0.40, d.yaw, d.px, gy, d.pz);
-        steelParts.push(visor);
-
-        const dome = CreateSphere('nlSgLens', { diameter: 1, segments: 8, slice: 0.5 }, scene);
-        dome.scaling.set(0.24, 0.07, 0.24);
-        dome.rotation.x = Math.PI / 2;               // dome faces +z (recessed in ring)
-        placeRot(dome, 0, ly, 0.342, d.yaw, d.px, gy, d.pz);
-        if (lit) (d.green ? greenParts : redParts).push(dome);
-        else darkParts.push(dome);
-      }
+    // one signal pole assembly at the origin facing +z, merged into a master
+    const steelParts = [];
+    const collar = CreateCylinder('nlSgCol', { height: 0.28, diameterBottom: 0.22, diameterTop: 0.17, tessellation: 14 }, scene);
+    collar.position.set(0, 0.14, 0);
+    steelParts.push(collar);
+    const pole = CreateCylinder('nlSgPole', { height: 3.75, diameterBottom: 0.15, diameterTop: 0.11, tessellation: 14 }, scene);
+    pole.position.set(0, 1.875, 0);
+    steelParts.push(pole);
+    const cap = CreateSphere('nlSgCap', { diameter: 0.125, segments: 8, slice: 0.5 }, scene);
+    cap.position.set(0, 3.75, 0);
+    steelParts.push(cap);
+    const bracket = CreateBox('nlSgBr', { width: 0.10, height: 0.56, depth: 0.18 }, scene);
+    bracket.position.set(0, 2.95, 0.08);
+    steelParts.push(bracket);
+    const housing = CreateBox('nlSgHouse', { width: 0.36, height: 1.04, depth: 0.27 }, scene);
+    housing.position.set(0, 2.95, 0.21);
+    steelParts.push(housing);
+    for (let j = 0; j < 3; j++) {
+      const ly = 3.25 - j * 0.3;
+      const ring = CreateCylinder('nlSgRing', { height: 0.06, diameter: 0.27, tessellation: 18 }, scene);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(0, ly, 0.35);
+      ring.bakeCurrentTransformIntoVertices();
+      steelParts.push(ring);
+      const visor = prism('nlSgVisor', scene, visorProfile, 0.26, false, 1, 1);
+      visor.rotation.x = 0.18;                     // hood tips forward-down
+      visor.position.set(0, ly + 0.028, 0.40);
+      visor.bakeCurrentTransformIntoVertices();
+      steelParts.push(visor);
     }
+    this._sigSteel = Mesh.MergeMeshes(steelParts, true, true);
+    this._sigSteel.name = 'nlSignals';
+    finalize(this._sigSteel, this._steelMat);
 
-    const sigSteel = Mesh.MergeMeshes(steelParts, true, true);
-    sigSteel.name = 'nlSignals';
-    finalize(sigSteel, this._steelMat);
-    const sigRed = Mesh.MergeMeshes(redParts, true, true);
-    sigRed.name = 'nlSignalsRed';
-    finalize(sigRed, this._redMat);
-    const sigGreen = Mesh.MergeMeshes(greenParts, true, true);
-    sigGreen.name = 'nlSignalsGreen';
-    finalize(sigGreen, this._greenMat);
-    const sigDark = Mesh.MergeMeshes(darkParts, true, true);
-    sigDark.name = 'nlSignalsDark';
-    finalize(sigDark, this._darkMat);
+    // lens dome master (instances distributed across dark/red/green meshes)
+    const makeDome = (name) => {
+      const dome = CreateSphere(name, { diameter: 1, segments: 8, slice: 0.5 }, scene);
+      dome.scaling.set(0.24, 0.07, 0.24);
+      dome.rotation.x = Math.PI / 2;               // dome faces +z (recessed in ring)
+      dome.bakeCurrentTransformIntoVertices();
+      return dome;
+    };
+    this._sigDark = makeDome('nlSignalsDark');
+    this._sigRed = makeDome('nlSignalsRed');
+    this._sigGreen = makeDome('nlSignalsGreen');
+    finalize(this._sigDark, this._darkMat);
+    finalize(this._sigRed, this._redMat);
+    finalize(this._sigGreen, this._greenMat);
   }
 
-  // -- bollards -------------------------------------------------------------
-  _buildBollards(scene) {
+  _buildBollardMaster(scene) {
     const shape = [
       new Vector3(0.078, 0, 0), new Vector3(0.072, 0.06, 0), new Vector3(0.062, 0.10, 0),
       new Vector3(0.062, 0.70, 0),
@@ -548,101 +448,23 @@ export class Props {
         break;
       }
     }
-
-    const spots = [];
-    const arc = (icx, icz, sx, sz, count, a0, a1) => {
-      const acx = icx + sx * (CURB_FACE + CORNER_R);
-      const acz = icz + sz * (CURB_FACE + CORNER_R);
-      for (let i = 0; i < count; i++) {
-        const th = (a0 + ((a1 - a0) * i) / (count - 1)) * DEG;
-        spots.push([acx - sx * 4.6 * Math.cos(th), acz - sz * 4.6 * Math.sin(th)]);
-      }
-    };
-    // sidewalk arcs of the central intersection: 5 per corner
-    arc(0, 0, 1, 1, 5, 18, 72);
-    arc(0, 0, -1, 1, 5, 18, 72);
-    arc(0, 0, 1, -1, 5, 18, 72);
-    arc(0, 0, -1, -1, 5, 18, 72);
-    // a few elsewhere
-    arc(0, 80, -1, -1, 4, 22, 68);
-    arc(-100, 0, 1, 1, 4, 22, 68);
-
-    const f = new Float32Array(spots.length * 16);
-    for (let i = 0; i < spots.length; i++) {
-      const [x, z] = spots[i];
-      writeYawT(f, i * 16, hash2(i, 101) * Math.PI * 2, x, groundHeight(x, z) - 0.015, z);
-    }
-    master.thinInstanceSetBuffer('matrix', f, 16, true);
+    this._bollards = master;
     finalize(master, this._steelMat);
   }
 
-  // -- street-end closures ---------------------------------------------------
-  _buildClosures(scene) {
-    // proper Jersey profile (m), CCW from bottom-left
+  _buildJerseyMaster(scene) {
+    // proper Jersey profile (m), CCW from bottom-left — now the motorway
+    // median barrier (street dead-ends no longer exist in the endless city)
     const jerseyProfile = [
       [-0.305, 0], [0.305, 0],
       [0.305, 0.075], [0.19, 0.33], [0.075, 0.80], [0.045, 0.84],
       [-0.045, 0.84], [-0.075, 0.80], [-0.19, 0.33], [-0.305, 0.075],
     ];
-    const jersey = prism('nlJersey', scene, jerseyProfile, 2.85, true, 0.45, 0.35);
-
-    // striped barrier board on two posts
-    const boardParts = [];
-    const plankUV = [STRIPE_UV, STRIPE_UV, STRIPE_UV, STRIPE_UV, STRIPE_UV, STRIPE_UV];
-    const greyUV = [GREY_UV, GREY_UV, GREY_UV, GREY_UV, GREY_UV, GREY_UV];
-    const plank = CreateBox('nlBoard', { width: 3.5, height: 0.32, depth: 0.045, faceUV: plankUV }, scene);
-    plank.position.y = 1.18;
-    boardParts.push(plank);
-    for (let s = -1; s <= 1; s += 2) {
-      const post = CreateBox('nlBoardPost', { width: 0.08, height: 1.38, depth: 0.06, faceUV: greyUV }, scene);
-      post.position.set(s * 1.5, 0.69, -0.055);
-      boardParts.push(post);
-      const foot = CreateBox('nlBoardFoot', { width: 0.34, height: 0.05, depth: 0.34, faceUV: greyUV }, scene);
-      foot.position.set(s * 1.5, 0.025, -0.055);
-      boardParts.push(foot);
-    }
-    const board = Mesh.MergeMeshes(boardParts, true, true);
-    board.name = 'nlBoards';
-
-    const ends = [];
-    for (let i = 0; i < STREETS_X.length; i++) {
-      ends.push({ x: STREETS_X[i], z: EXTENT_Z, axis: 0, dir: 1 });
-      ends.push({ x: STREETS_X[i], z: -EXTENT_Z, axis: 0, dir: -1 });
-    }
-    for (let i = 0; i < STREETS_Z.length; i++) {
-      ends.push({ x: EXTENT_X, z: STREETS_Z[i], axis: 1, dir: 1 });
-      ends.push({ x: -EXTENT_X, z: STREETS_Z[i], axis: 1, dir: -1 });
-    }
-
-    const jf = new Float32Array(ends.length * 3 * 16);
-    const bf = new Float32Array(ends.length * 16);
-    let ji = 0, salt = 0;
-    for (let e = 0; e < ends.length; e++) {
-      const end = ends[e];
-      for (let i = -1; i <= 1; i++) {
-        const off = i * 2.98 + (hash2(salt, 3) - 0.5) * 0.12;
-        const back = 2.15 + (hash2(salt, 7) - 0.5) * 0.4;
-        const jyaw = (hash2(salt, 11) - 0.5) * 0.11;
-        salt++;
-        let x, z, yaw;
-        if (end.axis === 0) { x = end.x + off; z = end.z - end.dir * back; yaw = Math.PI / 2 + jyaw; }
-        else { x = end.x - end.dir * back; z = end.z + off; yaw = jyaw; }
-        writeYawT(jf, ji * 16, yaw, x, groundHeight(x, z) - 0.02, z);
-        ji++;
-      }
-      let bx, bz, byaw;
-      if (end.axis === 0) { bx = end.x; bz = end.z - end.dir * 0.8; byaw = 0; }
-      else { bx = end.x - end.dir * 0.8; bz = end.z; byaw = Math.PI / 2; }
-      writeYawT(bf, e * 16, byaw, bx, groundHeight(bx, bz) - 0.02, bz);
-    }
-    jersey.thinInstanceSetBuffer('matrix', jf, 16, true);
-    board.thinInstanceSetBuffer('matrix', bf, 16, true);
-    finalize(jersey, this._concreteMat);
-    finalize(board, this._stripeMat);
+    this._jerseys = prism('nlJersey', scene, jerseyProfile, 2.85, true, 0.45, 0.35);
+    finalize(this._jerseys, this._concreteMat);
   }
 
-  // -- dumpsters -------------------------------------------------------------
-  _buildDumpsters(scene) {
+  _buildDumpsterMaster(scene) {
     const parts = [];
     parts.push(vprism('nlDpSkirt', scene, chamferRect(1.66, 0.93, 0.06), 0.14, 0, 0.3, 0.3));
     parts.push(vprism('nlDpBody', scene, chamferRect(1.80, 1.05, 0.10), 1.16, 0.12, 0.3, 0.3));
@@ -666,21 +488,167 @@ export class Props {
     handle.position.set(0, 1.06, 0.565);
     parts.push(handle);
 
-    const master = Mesh.MergeMeshes(parts, true, true);
-    master.name = 'nlDumpsters';
+    this._dumpsters = Mesh.MergeMeshes(parts, true, true);
+    this._dumpsters.name = 'nlDumpsters';
+    finalize(this._dumpsters, this._dumpsterMat);
+  }
 
-    const spots = [
-      { x: -100 + 6.55, z: 38, yaw: Math.PI / 2 + 0.07 },
-      { x: 30, z: 80 - 6.6, yaw: -0.05 },
-      { x: 100 - 6.55, z: -52, yaw: Math.PI / 2 - 0.09 },
-    ];
-    const f = new Float32Array(spots.length * 16);
-    for (let i = 0; i < spots.length; i++) {
-      const s = spots[i];
-      writeYawT(f, i * 16, s.yaw, s.x, groundHeight(s.x, s.z) - 0.025, s.z);
+  // -- region rebuild ---------------------------------------------------------
+  _rebuild(cx, cz) {
+    this._scanX = cx; this._scanZ = cz;
+    const minX = cx - R_PROPS, maxX = cx + R_PROPS;
+    const minZ = cz - R_PROPS, maxZ = cz + R_PROPS;
+    const segs = segmentsInRegion(minX, maxX, minZ, maxZ);
+    const crossings = crossingsInRegion(minX, maxX, minZ, maxZ);
+
+    // ---- streetlights: every ~24 m along every segment, alternating sides
+    const lamps = [];
+    this._heads.length = 0;
+    for (const seg of segs) {
+      const face = seg.axis === 1 ? rowFace(seg.line) : CURB_FACE;
+      const lateral = face + 0.55;
+      const m = CORNER_R + 0.4;
+      const a = seg.s0 + m, b = seg.s1 - m;
+      if (b - a < 4) continue;
+      const segId = seg.axis * 7919 + seg.line;
+      const segS0 = Math.round(seg.s0);
+      const nL = Math.max(1, Math.round((b - a) / LIGHT_SPACING));
+      const step = (b - a) / nL;
+      for (let i = 0; i < nL; i++) {
+        const s = a + step * (i + 0.5);
+        const side = cellSeed(segId, segS0, 31 + i) > 0.5 ? 1 : -1;
+        let x, z, yaw;
+        if (seg.axis === 0) {
+          x = seg.center + side * lateral; z = s; yaw = side > 0 ? Math.PI : 0;
+        } else {
+          x = s; z = seg.center + side * lateral; yaw = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+        }
+        it(lamps, x, z, yaw);
+      }
     }
-    master.thinInstanceSetBuffer('matrix', f, 16, true);
-    finalize(master, this._dumpsterMat);
+    setInstances(this._lampMaster, lamps, -0.02);
+    setInstances(this._lensMaster, lamps, -0.02);
+    for (const p of lamps) {
+      const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+      const y = groundHeight(p.x, p.z) - 0.02;
+      this._heads.push({
+        x: p.x + HEAD_LOCAL_X * c,
+        y: y + HEAD_LOCAL_Y,
+        z: p.z - HEAD_LOCAL_X * s,
+        r: SODIUM_R, g: SODIUM_G, b: SODIUM_B,
+        radius: HEAD_RADIUS,
+        intensity: this._si,
+      });
+    }
+    this.lightsGen++;
+
+    // ---- traffic signals: all motorway junctions + ~half of the rest
+    const poles = [];
+    const dark = [], redL = [], greenL = [];
+    for (const cr of crossings) {
+      const signalised = cr.mway || cellSeed(cr.i, cr.j, 41) < 0.5;
+      if (!signalised) continue;
+      const ox = CURB_FACE + CORNER_R - SIG_INSET;
+      const oz = rowFace(cr.j) + CORNER_R - SIG_INSET;
+      const nsGreen = cellSeed(cr.i, cr.j, 43) < 0.5;
+      const defs = [
+        { px: cr.x + ox, pz: cr.z + oz, yaw: Math.PI, green: nsGreen },        // faces -z
+        { px: cr.x - ox, pz: cr.z - oz, yaw: 0, green: nsGreen },              // faces +z
+        { px: cr.x - ox, pz: cr.z + oz, yaw: Math.PI / 2, green: !nsGreen },   // faces +x
+        { px: cr.x + ox, pz: cr.z - oz, yaw: -Math.PI / 2, green: !nsGreen },  // faces -x
+      ];
+      for (const d of defs) {
+        it(poles, d.px, d.pz, d.yaw);
+        const gy = groundHeight(d.px, d.pz) - 0.02;
+        const cyaw = Math.cos(d.yaw), syaw = Math.sin(d.yaw);
+        for (let j = 0; j < 3; j++) {
+          const ly = 3.25 - j * 0.3;
+          const lit = d.green ? j === 2 : j === 0;
+          const x = d.px + 0.342 * syaw;
+          const z = d.pz + 0.342 * cyaw;
+          (lit ? (d.green ? greenL : redL) : dark).push({ x, z, y: gy + ly, yaw: d.yaw });
+        }
+      }
+    }
+    setInstances(this._sigSteel, poles, -0.02);
+    const setDomes = (mesh, list) => {
+      if (list.length === 0) { mesh.setEnabled(false); return; }
+      const f = new Float32Array(list.length * 16);
+      for (let i = 0; i < list.length; i++) {
+        writeYawT(f, i * 16, list[i].yaw, list[i].x, list[i].y, list[i].z);
+      }
+      mesh.thinInstanceSetBuffer('matrix', f, 16, true);
+      mesh.thinInstanceRefreshBoundingInfo();
+      mesh.setEnabled(true);
+    };
+    setDomes(this._sigDark, dark);
+    setDomes(this._sigRed, redL);
+    setDomes(this._sigGreen, greenL);
+
+    // ---- bollards: sidewalk arcs on some non-motorway crossing corners
+    const bollards = [];
+    for (const cr of crossings) {
+      if (cr.mway) continue;
+      for (let sx = -1; sx <= 1; sx += 2) {
+        for (let sz = -1; sz <= 1; sz += 2) {
+          const roll = cellSeed(cr.i * 2 + (sx > 0 ? 1 : 0), cr.j * 2 + (sz > 0 ? 1 : 0), 47);
+          if (roll > 0.25) continue;
+          const acx = cr.x + sx * (CURB_FACE + CORNER_R);
+          const acz = cr.z + sz * (rowFace(cr.j) + CORNER_R);
+          const count = 5;
+          for (let i = 0; i < count; i++) {
+            const th = (18 + ((72 - 18) * i) / (count - 1)) * DEG;
+            it(bollards,
+              acx - sx * 4.6 * Math.cos(th),
+              acz - sz * 4.6 * Math.sin(th),
+              roll * 251 % (Math.PI * 2));
+          }
+        }
+      }
+    }
+    setInstances(this._bollards, bollards, -0.015);
+
+    // ---- Jersey barriers along motorway medians (gap at every junction)
+    const jerseys = [];
+    for (const seg of segs) {
+      if (seg.axis !== 1 || !seg.mway) continue;
+      const a = seg.s0 + 3.4, b = seg.s1 - 3.4;
+      const segS0 = Math.round(seg.s0);
+      for (let s = a; s + 2.85 <= b; s += 2.98) {
+        const jit = (cellSeed(seg.line, segS0, 53 + ((s / 2.98) | 0)) - 0.5) * 0.08;
+        it(jerseys, s + 1.42, seg.center + jit, Math.PI / 2 + jit * 0.5);
+      }
+    }
+    setInstances(this._jerseys, jerseys, -0.02);
+
+    // ---- dumpsters: some blocks park one against the sidewalk edge
+    const dumps = [];
+    for (const bl of blocksInRegion(minX, maxX, minZ, maxZ)) {
+      const roll = cellSeed(bl.ix, bl.jz, 59);
+      if (roll > 0.30) continue;
+      const side = (cellSeed(bl.ix, bl.jz, 61) * 4) | 0;
+      const f = 0.2 + cellSeed(bl.ix, bl.jz, 67) * 0.6;
+      let x, z, yaw;
+      if (side === 0) {        // south sidewalk
+        x = bl.x0 + (bl.x1 - bl.x0) * f;
+        z = bl.jz * PERIOD_Z + rowSwEdge(bl.jz) - 0.85;
+        yaw = (roll - 0.15) * 0.4;
+      } else if (side === 1) { // north sidewalk
+        x = bl.x0 + (bl.x1 - bl.x0) * f;
+        z = (bl.jz + 1) * PERIOD_Z - rowSwEdge(bl.jz + 1) + 0.85;
+        yaw = (roll - 0.15) * 0.4;
+      } else if (side === 2) { // west sidewalk
+        x = bl.ix * PERIOD_X + SIDEWALK_EDGE - 0.85;
+        z = bl.z0 + (bl.z1 - bl.z0) * f;
+        yaw = Math.PI / 2 + (roll - 0.15) * 0.4;
+      } else {                 // east sidewalk
+        x = (bl.ix + 1) * PERIOD_X - SIDEWALK_EDGE + 0.85;
+        z = bl.z0 + (bl.z1 - bl.z0) * f;
+        yaw = Math.PI / 2 + (roll - 0.15) * 0.4;
+      }
+      it(dumps, x, z, yaw);
+    }
+    setInstances(this._dumpsters, dumps, -0.025);
   }
 
   // -- module contract --------------------------------------------------------
@@ -689,9 +657,9 @@ export class Props {
   applyEnvironment(env) {
     const p = env.params;
     const si = p.streetlightIntensity;
+    this._si = si;
 
     // PBR props participate in scene fog (custom WGSL modules fog themselves).
-    // Remove these three lines if Environment takes ownership of scene fog.
     this.scene.fogMode = Scene.FOGMODE_EXP;
     this.scene.fogDensity = p.fogDensity;
     this.scene.fogColor.copyFromFloats(p.fogColor[0], p.fogColor[1], p.fogColor[2]);
@@ -699,6 +667,13 @@ export class Props {
     this._lensMat.unfreeze();
     this._lensMat.emissiveIntensity = LENS_BASE_EMISSIVE * si;
     this._lensMat.freeze();
+
+    // pale concrete (median barriers) also tracks ambient so it doesn't glow
+    const amb = Math.min(1, Math.max(0, p.ambientIntensity));
+    const cdim = 0.32 + 0.68 * amb * amb;
+    this._concreteMat.unfreeze();
+    this._concreteMat.albedoColor.copyFromFloats(0.80 * cdim, 0.79 * cdim, 0.76 * cdim);
+    this._concreteMat.freeze();
 
     const sig = SIGNAL_BASE_EMISSIVE * (0.30 + 0.70 * si); // signals stay lit by day
     this._redMat.unfreeze();
@@ -708,21 +683,24 @@ export class Props {
     this._greenMat.emissiveIntensity = sig;
     this._greenMat.freeze();
 
-    this._stripeMat.unfreeze();
-    this._stripeMat.emissiveIntensity = 0.08 + 0.5 * si;   // red stripes read at night
-    this._stripeMat.freeze();
-
     for (let i = 0; i < this._heads.length; i++) this._heads[i].intensity = si;
   }
 
-  /** Per-frame. Props are fully static; nothing to do (allocation-free). */
-  update(dt, camX, camZ) {} // eslint-disable-line no-unused-vars
+  /** Per-frame: rebuild instance buffers when the car has moved far enough. */
+  update(dt, camX, camZ) {
+    if (Math.hypot(camX - this._scanX, camZ - this._scanZ) > RESCAN_DIST) {
+      this._rebuild(camX, camZ);
+    }
+  }
+
+  /** Populate everything synchronously (loading-screen warmup). */
+  prewarm(camX, camZ) {
+    this._rebuild(camX, camZ);
+  }
 
   /**
-   * Current streetlight head lenses in world space, for the street-lighting
-   * integrator. Same array instance every call; intensity fields are updated
-   * in applyEnvironment (re-read after env changes).
-   * @returns {Array<{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,intensity:number}>}
+   * Current streetlight head lenses in world space. Same array instance every
+   * call; contents change on region rebuild (watch lightsGen).
    */
   getStreetlightHeads() {
     return this._heads;

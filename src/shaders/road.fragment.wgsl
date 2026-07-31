@@ -1,6 +1,6 @@
 // NIGHTLOOP road surface — the hero shader.
 // Multi-scale procedural asphalt with wetness as a first-class surface state.
-// Road-space constants MUST match src/city/cityPlan.js.
+// PERIODIC INFINITE grid + motorway rows: MUST match src/city/cityPlan.js.
 #include<sceneUboDeclaration>
 #include<nlCommon>
 
@@ -40,46 +40,49 @@ var asphaltRoughSampler : sampler;
 var mirrorTex : texture_2d<f32>;
 var mirrorTexSampler : sampler;
 var sunShadowMap : texture_2d<f32>;   // FILTER_NONE float map, depth metric in R (textureLoad only)
-var stateTex : texture_2d<f32>;    // r: water depth, g: displaced ridge, b: wetness, a: rubber
+var stateTex : texture_2d<f32>;    // r: water cleared, g: unused, b: damp, a: rubber
 var stateTexSampler : sampler;
 
 struct RoadLight { posRadius : vec4f, colorIntensity : vec4f };
 var<storage, read> roadLights : array<RoadLight>;
 
 // ---- city plan constants (keep in sync with cityPlan.js) ----
-const NL_CURB_FACE : f32 = 4.45;
+const NL_PX : f32 = 200.0;
+const NL_PZ : f32 = 160.0;
+const NL_FACE : f32 = 4.45;
 const NL_ROAD_HALF : f32 = 4.0;
+const NL_MWAY_FACE : f32 = 12.45;
+const NL_MWAY_HALF : f32 = 12.0;
+const NL_MEDIAN : f32 = 1.0;
+const NL_LANE_W : f32 = 3.5;
 const NL_CORNER_R : f32 = 5.5;
-const NL_EXTENT_X : f32 = 136.0;
-const NL_EXTENT_Z : f32 = 116.0;
 
 struct RS {
   tA : f32, tB : f32,   // signed lateral offset from nearest N-S / E-W street
   sA : f32, sB : f32,   // along-street coordinate
   dA : f32, dB : f32,
+  faceB : f32,          // E-W street curb face (motorways are wide)
   d : f32,              // SDF beyond curb face (<0 on asphalt)
   wB : f32,             // dominance of E-W street
-  intT : f32,           // 0 far from intersection, 1 inside
-  sIntA : f32, sIntB : f32, // distance along street from nearest intersection center
+  mwayB : f32,          // 1 when the E-W street is a motorway
+  intT : f32,           // 0 far from crossing, 1 inside
 };
 
-fn nearest3(v : f32, a : f32, b : f32, c : f32) -> f32 {
-  var best = a;
-  if (abs(v - b) < abs(v - best)) { best = b; }
-  if (abs(v - c) < abs(v - best)) { best = c; }
-  return best;
+fn isMwayRow(j : f32) -> f32 {
+  let m = j - 4.0 * floor(j / 4.0);
+  return select(0.0, 1.0, abs(m - 2.0) < 0.5);
 }
 
 fn roadSpace(p : vec2f) -> RS {
   var rs : RS;
-  let sx = nearest3(p.x, -100.0, 0.0, 100.0);
-  let sz = nearest3(p.y, -80.0, 0.0, 80.0);
-  rs.tA = p.x - sx; rs.sA = p.y;
-  rs.tB = p.y - sz; rs.sB = p.x;
-  var dA = abs(rs.tA) - NL_CURB_FACE;
-  var dB = abs(rs.tB) - NL_CURB_FACE;
-  dA = max(dA, abs(p.y) - NL_EXTENT_Z);
-  dB = max(dB, abs(p.x) - NL_EXTENT_X);
+  let iA = round(p.x / NL_PX);
+  let iB = round(p.y / NL_PZ);
+  rs.tA = p.x - iA * NL_PX; rs.sA = p.y;
+  rs.tB = p.y - iB * NL_PZ; rs.sB = p.x;
+  rs.mwayB = isMwayRow(iB);
+  rs.faceB = mix(NL_FACE, NL_MWAY_FACE, rs.mwayB);
+  let dA = abs(rs.tA) - NL_FACE;
+  let dB = abs(rs.tB) - rs.faceB;
   rs.dA = dA; rs.dB = dB;
   var d = min(dA, dB);
   if (dA < NL_CORNER_R && dB < NL_CORNER_R && dA > 0.0 && dB > 0.0) {
@@ -87,22 +90,31 @@ fn roadSpace(p : vec2f) -> RS {
     d = min(d, fd);
   }
   rs.d = d;
-  let aIn = NL_CURB_FACE - abs(rs.tA);
-  let bIn = NL_CURB_FACE - abs(rs.tB);
-  rs.wB = clamp(0.5 + (bIn - aIn) * 0.25, 0.0, 1.0);
-  // intersection proximity: both axes inside widened road bands
-  rs.sIntA = rs.sA - nearest3(rs.sA, -80.0, 0.0, 80.0);
-  rs.sIntB = rs.sB - nearest3(rs.sB, -100.0, 0.0, 100.0);
-  let ia = 1.0 - smoothstep(NL_CURB_FACE, NL_CURB_FACE + 2.0, abs(rs.sIntA));
-  let ib = 1.0 - smoothstep(NL_CURB_FACE, NL_CURB_FACE + 2.0, abs(rs.sIntB));
+  let aIn = (NL_FACE - abs(rs.tA)) / NL_FACE;
+  let bIn = (rs.faceB - abs(rs.tB)) / rs.faceB;
+  rs.wB = clamp(0.5 + (bIn - aIn) * 1.1, 0.0, 1.0);
+  // in a periodic grid, distance to the crossing ALONG a street is just the
+  // other street's lateral offset
+  let ia = 1.0 - smoothstep(rs.faceB, rs.faceB + 2.0, abs(rs.tB));
+  let ib = 1.0 - smoothstep(NL_FACE, NL_FACE + 2.0, abs(rs.tA));
   rs.intT = min(ia, ib);
   return rs;
 }
 
-// wheel-track wear (matches CPU ruts): tracks at |t| = 1.2 and 2.8
+// wheel-track wear, normal street (two lanes, tracks |t| = 1.2 and 2.8)
 fn trackMask(at : f32) -> f32 {
   let d1 = at - 1.2;
   let d2 = at - 2.8;
+  return exp(-d1 * d1 * 8.16) + exp(-d2 * d2 * 8.16);
+}
+
+// wheel-track wear, motorway: three lanes per carriageway, tracks ±0.8
+// around each lane centre (lane u = 0..3.5 within the carriageway span)
+fn trackMaskM(at : f32) -> f32 {
+  if (at < NL_MEDIAN || at > NL_MWAY_HALF) { return 0.0; }
+  let u = fract((at - NL_MEDIAN) / NL_LANE_W) * NL_LANE_W;
+  let d1 = u - 0.95;
+  let d2 = u - 2.55;
   return exp(-d1 * d1 * 8.16) + exp(-d2 * d2 * 8.16);
 }
 
@@ -111,35 +123,59 @@ fn laneStain(at : f32) -> f32 {
   return exp(-d * d * 4.9); // oily band at lane centre
 }
 
-// ---- markings ----------------------------------------------------------
-struct Markings { paint : f32, retro : f32 };
+fn laneStainM(at : f32) -> f32 {
+  if (at < NL_MEDIAN || at > NL_MWAY_HALF) { return 0.0; }
+  let u = fract((at - NL_MEDIAN) / NL_LANE_W) * NL_LANE_W;
+  let d = u - 1.75;
+  return exp(-d * d * 4.9);
+}
 
-fn axisMarkings(t : f32, s : f32, sInt : f32, inRoad : f32, erosion : f32) -> f32 {
+// ---- markings ----------------------------------------------------------
+// Normal street markings. t across, s along, tX = crossing street's lateral
+// offset (distance to the crossing), faceX its curb face, allowZebra kills
+// crosswalks at motorway junctions.
+fn axisMarkings(t : f32, s : f32, tX : f32, faceX : f32, inRoad : f32, erosion : f32, allowZebra : f32) -> f32 {
   if (inRoad < 0.001) { return 0.0; }
-  let asInt = abs(sInt);
-  let notInt = smoothstep(NL_CURB_FACE + 0.9, NL_CURB_FACE + 2.2, asInt);
+  let asInt = abs(tX);
+  let notInt = smoothstep(faceX + 0.9, faceX + 2.2, asInt);
   var m = 0.0;
   // centre dashes: 2m dash / 4m gap, 0.12m wide
   let dash = step(fract(s / 6.0), 0.3333);
   m = max(m, (1.0 - smoothstep(0.05, 0.075, abs(t))) * dash * notInt);
   // edge lines at |t| = 3.72, 0.10m wide
   m = max(m, (1.0 - smoothstep(0.04, 0.062, abs(abs(t) - 3.72))) * notInt);
-  // stop lines: 0.45m band, approach half only
-  let stopBand = 1.0 - smoothstep(0.0, 0.06, abs(asInt - 6.42) - 0.225);
-  let approachPos = step(0.0, sInt) * step(0.2, -t) * step(-3.8, -abs(t));
-  let approachNeg = step(0.0, -sInt) * step(0.2, t) * step(-3.8, -abs(t));
+  // stop lines: 0.45m band on the approach half, just before the crossing
+  let stopC = faceX + 1.97;
+  let stopBand = 1.0 - smoothstep(0.0, 0.06, abs(asInt - stopC) - 0.225);
+  let approachPos = step(0.0, tX) * step(0.2, -t) * step(-3.8, -abs(t));
+  let approachNeg = step(0.0, -tX) * step(0.2, t) * step(-3.8, -abs(t));
   m = max(m, stopBand * (approachPos + approachNeg));
-  // crosswalk zebra: |sInt| in [4.7, 6.1], bands across t (0.55 on / 0.35 off)
-  let cw = step(4.7, asInt) * step(asInt, 6.1);
+  // crosswalk zebra just outside the crossing
+  let cwC = faceX + 0.25;
+  let cw = step(cwC, asInt) * step(asInt, cwC + 1.4) * allowZebra;
   let zebra = step(fract(t / 0.9), 0.61);
   m = max(m, cw * zebra * step(abs(t), 3.9));
   return clamp(m - erosion, 0.0, 1.0);
 }
 
+// Motorway markings: lane-divider dashes (3m/6m) between the three lanes,
+// solid edge lines beside median and outer gutter. No zebras, no stop lines.
+fn mwayMarkings(t : f32, s : f32, tX : f32, erosion : f32) -> f32 {
+  let at = abs(t);
+  if (at < NL_MEDIAN - 0.2 || at > NL_MWAY_FACE) { return 0.0; }
+  let notInt = smoothstep(NL_FACE + 0.9, NL_FACE + 2.2, abs(tX));
+  var m = 0.0;
+  // solid edges: median side 1.35, outer 11.65
+  m = max(m, 1.0 - smoothstep(0.05, 0.075, abs(at - 1.35)));
+  m = max(m, 1.0 - smoothstep(0.05, 0.075, abs(at - 11.65)));
+  // lane dividers at |t| = 4.5 and 8.0, dashed 3m/6m
+  let dash = step(fract(s / 9.0), 0.3333) * notInt;
+  m = max(m, (1.0 - smoothstep(0.05, 0.075, abs(at - 4.5))) * dash);
+  m = max(m, (1.0 - smoothstep(0.05, 0.075, abs(at - 8.0))) * dash);
+  return clamp(m - erosion, 0.0, 1.0);
+}
+
 // ---- shadow ------------------------------------------------------------
-// Manual 9-tap PCF over Babylon's FILTER_NONE float map. The stored value is
-// (casterClipZ + shadowDV.x) / shadowDV.y + generatorBias; we compute the same
-// metric for the receiver and compare.
 fn shadowTap(ip : vec2<i32>, refM : f32) -> f32 {
   let stored = textureLoad(sunShadowMap, ip, 0).r;
   return select(0.0, 1.0, refM <= stored + 0.0011);
@@ -149,8 +185,6 @@ fn sampleSunShadow(wp : vec3f) -> f32 {
   let sp = uniforms.sunShadowMatrix * vec4f(wp, 1.0);
   let uv = vec2f(sp.x, sp.y) * 0.5 + vec2f(0.5);
   if (uv.x <= 0.002 || uv.x >= 0.998 || uv.y <= 0.002 || uv.y >= 0.998) { return 1.0; }
-  // stored metric is light-VIEW depth: (viewZ + minZ) / (minZ + maxZ);
-  // sp.z is normalized [0,1] ortho depth, so un-normalize first
   let viewZ = sp.z * (uniforms.shadowDV.y - uniforms.shadowDV.x) + uniforms.shadowDV.x;
   let refM = (viewZ + uniforms.shadowDV.x) / (uniforms.shadowDV.x + uniforms.shadowDV.y);
   let sz = uniforms.shadowMapSize;
@@ -196,18 +230,25 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
 
   let atA = abs(rs.tA);
   let atB = abs(rs.tB);
-  let inA = 1.0 - smoothstep(NL_ROAD_HALF - 0.2, NL_CURB_FACE, atA);
-  let inB = 1.0 - smoothstep(NL_ROAD_HALF - 0.2, NL_CURB_FACE, atB);
+  let roadHalfB = rs.faceB - 0.45;
+  let inA = 1.0 - smoothstep(NL_ROAD_HALF - 0.2, NL_FACE, atA);
+  let inB = 1.0 - smoothstep(roadHalfB - 0.2, rs.faceB, atB);
 
   // ------------------------------------------------ masks
   let detailFade = 1.0 - smoothstep(14.0, 48.0, dist);   // fine detail gate
-  let wear = clamp(trackMask(atA) * inA * (1.0 - rs.wB) + trackMask(atB) * inB * rs.wB
+  let wearB = mix(trackMask(atB), trackMaskM(atB), rs.mwayB);
+  let wear = clamp(trackMask(atA) * inA * (1.0 - rs.wB) + wearB * inB * rs.wB
              + rs.intT * 0.35, 0.0, 1.2);
-  let stain = laneStain(atA) * inA * (1.0 - rs.wB) + laneStain(atB) * inB * rs.wB;
+  let stainB = mix(laneStain(atB), laneStainM(atB), rs.mwayB);
+  let stain = laneStain(atA) * inA * (1.0 - rs.wB) + stainB * inB * rs.wB;
   let gutter = smoothstep(-0.5, -0.05, rs.d);            // near the curb line
   let edgeRavel = smoothstep(-1.1, -0.25, rs.d);         // coarser aggregate near edge
 
-  // patchMes: hashed rectangles in road space of the dominant street
+  // motorway median island (raised concrete, outside junctions)
+  let medianMask = rs.mwayB * (1.0 - smoothstep(NL_MEDIAN - 0.15, NL_MEDIAN, atB))
+                 * (1.0 - rs.intT) * inB;
+
+  // patches: hashed rectangles in road space of the dominant street
   var sDom = rs.sA; var tDom = rs.tA;
   if (rs.wB > 0.5) { sDom = rs.sB; tDom = rs.tB; }
   let pcell = floor(sDom / 13.0);
@@ -221,7 +262,6 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     let inS = step(ps0, sDom) * step(sDom, ps1);
     let inT = step(pt0, tDom) * step(tDom, pt1);
     patchM = inS * inT;
-    // sealant edge band
     let eS = min(sDom - ps0, ps1 - sDom);
     let eT = min(tDom - pt0, pt1 - tDom);
     let eb = 1.0 - smoothstep(0.0, 0.14, min(eS, eT));
@@ -262,11 +302,17 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   // markings
   let erosionN = nlFbm3(wp.xz * 1.9);
   let erosion = clamp(uniforms.markingWear * (0.35 + wear * 0.9) * (0.4 + erosionN * 1.2), 0.0, 0.95);
-  let mA = axisMarkings(rs.tA, rs.sA, rs.sIntA, inA * (1.0 - rs.wB * 0.7), erosion);
-  let mB = axisMarkings(rs.tB, rs.sB, rs.sIntB, inB * (1.0 - (1.0 - rs.wB) * 0.7), erosion);
-  let paint = max(mA, mB);
+  let allowZebra = 1.0 - rs.mwayB;
+  let mA = axisMarkings(rs.tA, rs.sA, rs.tB, rs.faceB, inA * (1.0 - rs.wB * 0.7), erosion, allowZebra);
+  let mBn = axisMarkings(rs.tB, rs.sB, rs.tA, NL_FACE, inB * (1.0 - (1.0 - rs.wB) * 0.7), erosion, allowZebra);
+  let mBm = mwayMarkings(rs.tB, rs.sB, rs.tA, erosion) * inB;
+  let mB = mix(mBn, mBm, rs.mwayB);
+  let paint = max(mA, mB) * (1.0 - medianMask);
   let paintCol = vec3f(0.62, 0.62, 0.58);
   albedo = mix(albedo, paintCol, paint * 0.92);
+
+  // median island: pale worn concrete
+  albedo = mix(albedo, vec3f(0.30, 0.30, 0.29) * (0.8 + 0.4 * tone), medianMask * 0.9);
 
   // ------------------------------------------------ wetness / water
   // depression proxy — matches the CPU heightfield's settle + cross profile
@@ -274,10 +320,14 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   var crossRel = 0.0;
   {
     let ca = clamp(atA, 0.0, NL_ROAD_HALF) / NL_ROAD_HALF;
+    let hA = (1.0 - ca * ca) * inA * 0.055;
+    // normal row crown OR motorway crossfall + raised median
     let cb = clamp(atB, 0.0, NL_ROAD_HALF) / NL_ROAD_HALF;
-    let hA = (1.0 - ca * ca) * inA;
-    let hB = (1.0 - cb * cb) * inB;
-    crossRel = max(hA, hB) * 0.055;                             // crown height
+    let hBn = (1.0 - cb * cb) * 0.055;
+    let run = clamp((atB - NL_MEDIAN) / (NL_MWAY_HALF - NL_MEDIAN), 0.0, 1.0);
+    let hBm = 0.075 * (1.0 - run) + medianMask * 0.16;
+    let hB = mix(hBn, hBm, rs.mwayB) * inB;
+    crossRel = max(hA, hB);
   }
   let gutterDepth = gutter * 0.020;
   let potential = settleN * 0.028 + crossRel - gutterDepth;     // local relative height
@@ -325,6 +375,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     aggStr = aggStr * (1.0 + edgeRavel * 0.5 + gutter * 0.4);
     aggStr = aggStr * (1.0 - wetF * 0.45);          // water fills pores
     aggStr = aggStr * (1.0 - waterMask);
+    aggStr = aggStr * (1.0 - medianMask * 0.6);     // concrete is finer
     N = normalize(N + vec3f(tn.x, 0.0, tn.y) * aggStr);
   }
 
@@ -362,6 +413,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   rough = mix(rough, 0.10, wetF * (1.0 - paint * 0.3));     // wet collapse
   rough = mix(rough, 0.035, waterMask);                     // standing water
   rough = mix(rough, 0.30, clamp(stateS.a, 0.0, 1.0) * (1.0 - wetF)); // rubber glossier when dry
+  rough = mix(rough, 0.85, medianMask * (1.0 - wetF));      // concrete island stays matte
   rough = clamp(rough + uniforms.rainRate * waterMask * 0.06, 0.03, 1.0);
   let f0 = mix(0.038, 0.021, waterMask);
 

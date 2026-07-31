@@ -30,24 +30,28 @@ import { groundHeight } from './roadProfile.js';
 import skylineVertex from '../shaders/skyline.vertex.wgsl?raw';
 import skylineFragment from '../shaders/skyline.fragment.wgsl?raw';
 
-// Tower rings. Radii keep everything well inside the sky dome and the 2000 m
-// camera far plane; ring C is the barely-lit far mass.
+// Tower rings. The endless streamed city reaches ~430 m (roads) / ~340 m
+// (buildings) around the car, so the impostor rings start beyond that and the
+// whole skyline mesh re-centres on the car in coarse snaps (see update()).
+// Radii keep everything well inside the 2000 m camera far plane; ring C is
+// the barely-lit far mass.
 const RINGS = [
-  { n: 38, r0: 285, r1: 420, hMin: 55, hMax: 150, wMin: 16, wMax: 34, tier: 0.45, litMul: 1.0 },
-  { n: 52, r0: 450, r1: 700, hMin: 70, hMax: 215, wMin: 22, wMax: 55, tier: 0.30, litMul: 0.65 },
-  { n: 34, r0: 750, r1: 940, hMin: 90, hMax: 265, wMin: 36, wMax: 85, tier: 0.0, litMul: 0.28 },
+  { n: 38, r0: 460, r1: 620, hMin: 60, hMax: 160, wMin: 18, wMax: 38, tier: 0.45, litMul: 1.0 },
+  { n: 52, r0: 650, r1: 900, hMin: 75, hMax: 225, wMin: 24, wMax: 58, tier: 0.30, litMul: 0.65 },
+  { n: 34, r0: 950, r1: 1200, hMin: 95, hMax: 275, wMin: 38, wMax: 88, tier: 0.0, litMul: 0.28 },
 ];
 // Continuous low-rise ribbons (closed polygonal walls) under/between the rings.
 const FLOORS = [
-  { n: 56, r: 275, jit: 0.04, hMin: 4, hMax: 13, lit: 0.032 },
-  { n: 48, r: 430, jit: 0.10, hMin: 6, hMax: 19, lit: 0.022 },
-  { n: 40, r: 705, jit: 0.10, hMin: 9, hMax: 28, lit: 0.014 },
+  { n: 56, r: 450, jit: 0.05, hMin: 4, hMax: 13, lit: 0.032 },
+  { n: 48, r: 645, jit: 0.10, hMin: 6, hMax: 19, lit: 0.022 },
+  { n: 40, r: 940, jit: 0.10, hMin: 9, hMax: 28, lit: 0.014 },
 ];
-// Rings are superellipses (squircle exponent 1/3), not circles: the corners
-// bulge outward so the inner ring and floor ribbon clear the rectangular
-// outer buildable blocks (cityPlan blockRects reach +/-260 x, +/-220 z).
+// Slightly elliptical so the ring reads less like a perfect circle.
 const ELL_X = 1.10;
 const ELL_Z = 0.94;
+// Re-centre snap: coarse enough that parallax still happens within a cell,
+// small enough that the ring never drifts visibly off-centre.
+const FOLLOW_SNAP = 80;
 
 function ringX(ang, rad) {
   const c = Math.cos(ang);
@@ -299,10 +303,18 @@ export class Skyline {
     m.setFloat('exposure', p.exposure);
   }
 
-  /** Per-frame: beacon blink only. Allocation-free. */
+  /** Per-frame: beacon blink + coarse-snap ring follow. Allocation-free. */
   update(dt, camX, camZ) {
     this._time += dt;
     this.material.setFloat('time', this._time);
+    const sx = Math.round(camX / FOLLOW_SNAP) * FOLLOW_SNAP;
+    const sz = Math.round(camZ / FOLLOW_SNAP) * FOLLOW_SNAP;
+    if (sx !== this.mesh.position.x || sz !== this.mesh.position.z) {
+      this.mesh.unfreezeWorldMatrix();
+      this.mesh.position.set(sx, 0, sz);
+      this.mesh.computeWorldMatrix(true);
+      this.mesh.freezeWorldMatrix();
+    }
   }
 
   /** Touch the single pipeline variant once during load. */

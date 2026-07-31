@@ -1,33 +1,39 @@
 /**
- * Road surface geometry — streamed LOD chunks on a ring centred on the car.
+ * Road surface geometry — endless streamed LOD chunks around the car.
+ *
+ * The periodic city plan means chunk definitions are generated on demand:
+ * every ~24 m of car travel the wanted set of street pieces / intersection
+ * patches inside RING1 is recomputed; missing chunks are queued and built
+ * incrementally under a strict per-frame time budget, chunks far outside the
+ * ring are disposed. LOD0 (fine) streams inside RING0 exactly as before,
+ * cached until the chunk itself is evicted.
  *
  * The carriageway (SDF d < 0) is meshed as world-space-baked grids:
- *   - street pieces: rectangles in road space (s along, t across ±CURB_FACE)
+ *   - street pieces: rectangles in road space (s along, t across ±face)
  *   - intersection patches: xz grids covering the crossing incl. curb fillets,
  *     with off-road cells dropped and boundary verts projected onto d = 0.
- *
- * LOD1 (0.3 m) is prebuilt for everything at load; LOD0 (0.075 m) streams in
- * within RING0 of the car, built incrementally under a per-frame time budget
- * so streaming never hitches. All chunks get skirts, so LOD seams and
- * neighbour mismatches can never open visible cracks.
+ * All chunks get skirts, so LOD seams can never open visible cracks.
  */
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import {
-  STREETS_X, STREETS_Z, CURB_FACE, CORNER_R,
-  sampleRoadSpace, streetSegments,
+  CURB_FACE, CORNER_R, sampleRoadSpace, segmentsInRegion, crossingsInRegion,
+  rowFace, rowIsMotorway,
 } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { quality } from '../core/quality.js';
+import { buildBudget } from '../core/buildBudget.js';
 
-const LOD0_STEP = quality.lod0Step;   // 0 disables LOD0 entirely
+const LOD0_STEP = quality.lod0Step;    // 0 disables LOD0 entirely
+const LOD0_STEP_MWAY = LOD0_STEP * 2;  // wide carriageway is flatter — coarser is fine
 const LOD1_STEP = 0.30;
-const RING0 = quality.lod0Ring;       // build LOD0 inside this distance
+const RING0 = quality.lod0Ring;        // build LOD0 inside this distance
 const RING0_DROP = quality.lod0Ring + 16;
-const PIECE_LEN = 22;      // street chunk length target
-const SKIRT = 0.06;        // skirt drop (m)
-const BUILD_BUDGET_MS = 2.6;
-const INT_HALF = CURB_FACE + CORNER_R; // intersection patch half-size (9.95)
+const RING1 = 430;                     // chunks exist inside this distance…
+const RING1_DROP = 470;                // …and are disposed beyond this
+const RESCAN_DIST = 24;                // region recompute cadence (m of travel)
+const PIECE_LEN = 28;                  // street chunk length target
+const SKIRT = 0.06;                    // skirt drop (m)
 
 const _rs = { iA: 0, tA: 0, dA: 0, iB: 0, tB: 0, dB: 0, d: 0, wB: 0 };
 
@@ -39,84 +45,114 @@ export class RoadChunks {
   constructor(scene, material) {
     this.scene = scene;
     this.material = material;
+    /** @type {Map<string, Chunk>} */
+    this.chunks = new Map();
+    /** @type {Chunk|null} chunk currently being built incrementally */
+    this._building = null;
     /** @type {Chunk[]} */
-    this.chunks = [];
+    this._buildQueue = [];
+    this._scanX = Infinity;
+    this._scanZ = Infinity;
+    this.maxBuildMs = 0;
+    /** bumped whenever meshes are created/disposed (render-list refresh hook) */
+    this.generation = 0;
+  }
 
-    // street pieces
-    for (const seg of streetSegments()) {
+  /** Recompute the wanted chunk set around (cx, cz). */
+  _rescan(cx, cz) {
+    this._scanX = cx; this._scanZ = cz;
+    const minX = cx - RING1, maxX = cx + RING1;
+    const minZ = cz - RING1, maxZ = cz + RING1;
+
+    for (const seg of segmentsInRegion(minX, maxX, minZ, maxZ)) {
       const len = seg.s1 - seg.s0;
       const n = Math.max(1, Math.round(len / PIECE_LEN));
       const step = len / n;
       for (let i = 0; i < n; i++) {
-        this.chunks.push(new Chunk(this, {
+        const key = `st:${seg.axis}:${seg.line}:${Math.round(seg.s0)}:${i}`;
+        if (this.chunks.has(key)) continue;
+        const c = new Chunk(this, {
           kind: 'street', axis: seg.axis, center: seg.center,
           s0: seg.s0 + i * step, s1: seg.s0 + (i + 1) * step,
-        }));
+          face: seg.axis === 1 ? rowFace(seg.line) : CURB_FACE,
+          mway: seg.mway,
+        });
+        if (c.distanceTo(cx, cz) > RING1) continue;
+        c.key = key;
+        this.chunks.set(key, c);
+        c.wantLod = 1;
+        this._buildQueue.push(c);
       }
     }
-    // intersection patches
-    for (const sx of STREETS_X) {
-      for (const sz of STREETS_Z) {
-        this.chunks.push(new Chunk(this, { kind: 'intersection', x: sx, z: sz }));
-      }
+    for (const cr of crossingsInRegion(minX, maxX, minZ, maxZ)) {
+      const key = `x:${cr.i}:${cr.j}`;
+      if (this.chunks.has(key)) continue;
+      const c = new Chunk(this, {
+        kind: 'intersection', x: cr.x, z: cr.z,
+        halfX: CURB_FACE + CORNER_R,
+        halfZ: rowFace(cr.j) + CORNER_R,
+        mway: cr.mway,
+      });
+      if (c.distanceTo(cx, cz) > RING1) continue;
+      c.key = key;
+      this.chunks.set(key, c);
+      c.wantLod = 1;
+      this._buildQueue.push(c);
     }
 
-    // prebuild LOD1 for everything (runs during the loading screen)
-    for (const c of this.chunks) c.setMesh(1, c.build(LOD1_STEP));
-
-    // intersections get permanent LOD0 at load — they are the big patches
-    // whose finalisation would otherwise be the one streaming hitch left
-    if (LOD0_STEP > 0) {
-      for (const c of this.chunks) {
-        if (c.def.kind === 'intersection') {
-          c.setMesh(0, c.build(LOD0_STEP));
-          c.permanent = true;
-        }
+    // evict chunks far outside the ring (geometry is deterministic — it can
+    // always be rebuilt when the car comes back)
+    for (const [key, c] of this.chunks) {
+      if (c.distanceTo(cx, cz) > RING1_DROP && c !== this._building) {
+        c.disposeAll();
+        this.chunks.delete(key);
       }
     }
-
-    /** @type {Chunk|null} chunk currently being built incrementally */
-    this._building = null;
-    this._buildQueue = [];
-    this.maxBuildMs = 0;
   }
 
-  /** Per-frame LOD management under a strict time budget. */
+  /** Per-frame streaming + LOD management under the shared build budget. */
   update(dt, carX, carZ) {
-    if (LOD0_STEP === 0) return; // low preset: LOD1 everywhere
-    // continue an in-progress build first
     const t0 = performance.now();
-    if (this._building) {
-      if (this._building.buildSlice(t0)) this._building = null;
-      const spent = performance.now() - t0;
-      if (spent > this.maxBuildMs) this.maxBuildMs = spent;
+    const deadline = buildBudget.deadline();
+    if (Math.hypot(carX - this._scanX, carZ - this._scanZ) > RESCAN_DIST) {
+      this._rescan(carX, carZ);
     }
 
-    // queue scan (cheap): promote/demote by distance. LOD0 geometry is
-    // deterministic, so once built it is cached forever and merely toggled —
-    // no dispose/rebuild churn, no GC spikes on revisits.
-    for (let i = 0; i < this.chunks.length; i++) {
-      const c = this.chunks[i];
-      if (c.permanent) continue;
-      const d = c.distanceTo(carX, carZ);
-      if (d < RING0 && c.lod !== 0 && !c.building) {
-        if (c.mesh0) {
-          c.mesh0.setEnabled(true);
-          if (c.mesh1) c.mesh1.setEnabled(false);
-          c.lod = 0;
-        } else {
-          c.building = true;
-          this._buildQueue.push(c);
-        }
-      } else if (d > RING0_DROP && c.lod === 0) {
-        c.dropLOD0();
+    // continue an in-progress build first
+    if (this._building && performance.now() < deadline) {
+      if (this._building.buildSlice(deadline)) {
+        this._building = null;
+        this.generation++;
       }
     }
 
-    // start next build if idle and budget remains
-    if (!this._building && this._buildQueue.length > 0) {
-      // nearest first
-      let bi = 0, bd = Infinity;
+    // LOD promotion/demotion by distance. LOD0 geometry is cached until the
+    // chunk is evicted and merely toggled — no dispose/rebuild churn.
+    if (LOD0_STEP > 0) {
+      for (const c of this.chunks.values()) {
+        if (!c.mesh1) continue; // still awaiting its initial LOD1 build
+        const d = c.distanceTo(carX, carZ);
+        if (d < RING0 && c.lod === 1 && !c.building) {
+          if (c.mesh0) {
+            c.mesh0.setEnabled(true);
+            if (c.mesh1) c.mesh1.setEnabled(false);
+            c.lod = 0;
+            this.generation++;
+          } else {
+            c.building = true;
+            c.wantLod = 0;
+            this._buildQueue.push(c);
+          }
+        } else if (d > RING0_DROP && c.lod === 0) {
+          c.dropLOD0();
+          this.generation++;
+        }
+      }
+    }
+
+    // start next build if idle and time remains: nearest first
+    if (!this._building && this._buildQueue.length > 0 && performance.now() < deadline) {
+      let bi = -1, bd = Infinity;
       for (let i = 0; i < this._buildQueue.length; i++) {
         const d = this._buildQueue[i].distanceTo(carX, carZ);
         if (d < bd) { bd = d; bi = i; }
@@ -124,25 +160,37 @@ export class RoadChunks {
       const c = this._buildQueue[bi];
       this._buildQueue[bi] = this._buildQueue[this._buildQueue.length - 1];
       this._buildQueue.pop();
-      if (c.distanceTo(carX, carZ) < RING0_DROP) {
-        c.beginBuild(LOD0_STEP);
+      const alive = this.chunks.get(c.key) === c;
+      if (alive && (c.wantLod === 1 || c.distanceTo(carX, carZ) < RING0_DROP)) {
+        c.beginBuild(c.buildStep());
         this._building = c;
-        c.buildSlice(t0);
-        if (c.buildDone) this._building = null;
+        if (c.buildSlice(deadline)) {
+          this._building = null;
+          this.generation++;
+        }
       } else {
         c.building = false;
       }
     }
+
+    const spent = performance.now() - t0;
+    buildBudget.report(spent);
+    if (spent > this.maxBuildMs) this.maxBuildMs = spent;
   }
 
-  /** Build every LOD0 ring chunk synchronously (loading-screen warmup). */
+  /** Populate + build the whole ring synchronously (loading-screen warmup). */
   prewarm(carX, carZ) {
-    if (LOD0_STEP === 0) return;
-    for (const c of this.chunks) {
-      if (c.distanceTo(carX, carZ) < RING0) {
-        c.setMesh(0, c.build(LOD0_STEP));
+    this._rescan(carX, carZ);
+    this._buildQueue.length = 0;
+    for (const c of this.chunks.values()) {
+      c.setMesh(1, c.build(LOD1_STEP));
+      if (LOD0_STEP > 0 && c.distanceTo(carX, carZ) < RING0) {
+        c.setMesh(0, c.build(c.def.mway ? LOD0_STEP_MWAY : LOD0_STEP));
       }
+      c.wantLod = c.lod;
+      c.building = false;
     }
+    this.generation++;
   }
 }
 
@@ -150,7 +198,9 @@ class Chunk {
   constructor(owner, def) {
     this.owner = owner;
     this.def = def;
+    this.key = '';
     this.lod = -1;
+    this.wantLod = 1;
     this.mesh0 = null;
     this.mesh1 = null;
     this.building = false;
@@ -159,20 +209,25 @@ class Chunk {
 
     if (def.kind === 'street') {
       if (def.axis === 0) {
-        this.minX = def.center - CURB_FACE; this.maxX = def.center + CURB_FACE;
+        this.minX = def.center - def.face; this.maxX = def.center + def.face;
         this.minZ = def.s0; this.maxZ = def.s1;
       } else {
         this.minX = def.s0; this.maxX = def.s1;
-        this.minZ = def.center - CURB_FACE; this.maxZ = def.center + CURB_FACE;
+        this.minZ = def.center - def.face; this.maxZ = def.center + def.face;
       }
     } else {
-      this.minX = def.x - INT_HALF; this.maxX = def.x + INT_HALF;
-      this.minZ = def.z - INT_HALF; this.maxZ = def.z + INT_HALF;
+      this.minX = def.x - def.halfX; this.maxX = def.x + def.halfX;
+      this.minZ = def.z - def.halfZ; this.maxZ = def.z + def.halfZ;
     }
     this.cx = (this.minX + this.maxX) * 0.5;
     this.cz = (this.minZ + this.maxZ) * 0.5;
     this.hx = (this.maxX - this.minX) * 0.5;
     this.hz = (this.maxZ - this.minZ) * 0.5;
+  }
+
+  buildStep() {
+    if (this.wantLod === 1) return LOD1_STEP;
+    return this.def.mway ? LOD0_STEP_MWAY : LOD0_STEP;
   }
 
   distanceTo(x, z) {
@@ -181,11 +236,13 @@ class Chunk {
     return Math.hypot(dx, dz);
   }
 
-  /** Synchronous build (used for LOD1 prebuild and warmup). */
+  /** Synchronous build (used for warmup). */
   build(step) {
     this.beginBuild(step);
     while (!this.stepBuild(Infinity)) { /* run to completion */ }
-    return this._vd;
+    const vd = this._vd;
+    this._vd = null;
+    return vd;
   }
 
   beginBuild(step) {
@@ -207,11 +264,11 @@ class Chunk {
     this.buildDone = false;
   }
 
-  /** Returns true when the build completed. Budgeted by wall-clock. */
-  buildSlice(tStart) {
-    const done = this.stepBuild(tStart);
+  /** Returns true when the build completed. Budgeted by wall-clock deadline. */
+  buildSlice(deadline) {
+    const done = this.stepBuild(deadline);
     if (done) {
-      this.setMesh(0, this._vd);
+      this.setMesh(this.wantLod, this._vd);
       this._vd = null;
       this.building = false;
       this.buildDone = true;
@@ -219,8 +276,8 @@ class Chunk {
     return done;
   }
 
-  _over(tStart) {
-    return performance.now() - tStart > BUILD_BUDGET_MS;
+  _over(deadline) {
+    return performance.now() > deadline;
   }
 
   /**
@@ -430,6 +487,15 @@ class Chunk {
     if (this.mesh0) this.mesh0.setEnabled(false);
     if (this.mesh1) this.mesh1.setEnabled(true);
     this.lod = 1;
+  }
+
+  disposeAll() {
+    if (this.mesh0) { this.mesh0.dispose(false, false); this.mesh0 = null; }
+    if (this.mesh1) { this.mesh1.dispose(false, false); this.mesh1 = null; }
+    this._bs = null;
+    this._vd = null;
+    this.lod = -1;
+    this.building = false;
   }
 }
 

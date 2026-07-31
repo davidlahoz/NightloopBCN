@@ -70,7 +70,7 @@ if (process.env.DRIVE) {
   if (!process.env.NOUI) await page.keyboard.press('Backquote');
   await page.keyboard.down('w');
   if (process.env.DRIVE === 'straight') {
-    await page.waitForTimeout(2600);
+    await page.waitForTimeout(parseInt(process.env.DRIVE_MS ?? '2600', 10));
   } else if (process.env.DRIVE === 'drift') {
     await page.waitForTimeout(parseInt(process.env.RUNUP_MS ?? '2400', 10));
     await page.keyboard.down('Shift');

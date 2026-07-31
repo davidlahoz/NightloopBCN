@@ -21,7 +21,7 @@ export class Overlay {
     this._buildDOM();
 
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'Backquote' || e.code === 'F1') {
+      if (e.code === 'Backquote' || e.code === 'F1' || e.code === 'Digit0') {
         e.preventDefault();
         this.toggle();
       }

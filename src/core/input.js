@@ -15,7 +15,7 @@ export class Input {
     this.wheel = 0;
     this.rmb = false;
     this.lmb = false;
-    /** Last pressed mood key 1..5, or 0. Consumed by weather system. */
+    /** Last pressed time-of-day key 1..3, or 0. Consumed by weather system. */
     this.moodKey = 0;
     /** One-shot flags, consumed each frame. */
     this.toggleCamera = false;
@@ -25,7 +25,7 @@ export class Input {
       this.down[e.code] = true;
       if (e.code.startsWith('Digit')) {
         const n = e.code.charCodeAt(5) - 48;
-        if (n >= 1 && n <= 5) this.moodKey = n;
+        if (n >= 1 && n <= 3) this.moodKey = n;
       }
       if (e.code === 'KeyC') this.toggleCamera = true;
     });

@@ -3,17 +3,19 @@
  * quad; 48 pieces live near the car, recycled ahead when left behind. CPU
  * updates one preallocated matrix buffer per frame (48 groundHeight calls —
  * negligible), giving correct ground contact and gusty stop-start motion.
+ * Streets are the periodic plan's nearest cols/rows, so this works anywhere
+ * in the endless city.
  */
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import '@babylonjs/core/Meshes/thinInstanceMesh.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
-import { STREETS_X, STREETS_Z, ROAD_HALF, EXTENT_X, EXTENT_Z } from '../city/cityPlan.js';
+import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowFace } from '../city/cityPlan.js';
 import { groundHeight } from '../city/roadProfile.js';
 import { valueNoise, hash2 } from '../city/noise.js';
 
 const N = 48;
-const GUTTER_T = 3.9; // ride the lane edge / gutter line
+const GUTTER_T = 3.9; // ride the lane edge / gutter line (normal streets)
 
 export class Litter {
   /** @param {import('@babylonjs/core').Scene} scene */
@@ -31,9 +33,9 @@ export class Litter {
     this.mesh = master;
 
     this._m = new Float32Array(N * 16);
-    // per piece: axis(0 NS/1 EW), streetIdx, side(±1), s, speed, tumble, phase
+    // per piece: axis(0 NS/1 EW), absolute street line index, side(±1), s…
     this._axis = new Uint8Array(N);
-    this._street = new Uint8Array(N);
+    this._line = new Int32Array(N);
     this._side = new Float32Array(N);
     this._s = new Float32Array(N);
     this._tumble = new Float32Array(N);
@@ -47,14 +49,11 @@ export class Litter {
   _recycle(i, carX, carZ, anywhere) {
     const r = hash2(i * 7 + ((this._time * 13) | 0), 3);
     this._axis[i] = r > 0.5 ? 1 : 0;
-    this._street[i] = (hash2(i, 11) * 3) | 0;
+    const off = ((hash2(i, 11) * 3) | 0) - 1;
+    this._line[i] = (this._axis[i] === 0 ? colIndex(carX) : rowIndex(carZ)) + off;
     this._side[i] = hash2(i, 13) > 0.5 ? 1 : -1;
     const along = anywhere ? (hash2(i, 17) - 0.5) * 180 : (hash2(i, 17) - 0.30) * 90;
-    if (this._axis[i] === 0) {
-      this._s[i] = clampAbs(carZ + along, EXTENT_Z - 4);
-    } else {
-      this._s[i] = clampAbs(carX + along, EXTENT_X - 4);
-    }
+    this._s[i] = (this._axis[i] === 0 ? carZ : carX) + along;
     this._tumble[i] = hash2(i, 19) * Math.PI * 2;
     this._phase[i] = hash2(i, 23) * 100;
   }
@@ -73,11 +72,11 @@ export class Litter {
 
       let x, z;
       if (this._axis[i] === 0) {
-        x = STREETS_X[this._street[i]] + this._side[i] * GUTTER_T;
+        x = this._line[i] * PERIOD_X + this._side[i] * GUTTER_T;
         z = this._s[i];
       } else {
         x = this._s[i];
-        z = STREETS_Z[this._street[i]] + this._side[i] * GUTTER_T;
+        z = this._line[i] * PERIOD_Z + this._side[i] * (rowFace(this._line[i]) - 0.55);
       }
       const dx = x - carX, dz = z - carZ;
       if (dx * dx + dz * dz > 4900) {
@@ -103,8 +102,4 @@ export class Litter {
     this.wind = 0.45 + p.rainRate * 0.9 + p.cloudCover * 0.3 - (p.fogDensity > 0.015 ? 0.5 : 0);
     if (this.wind < 0.05) this.wind = 0.05;
   }
-}
-
-function clampAbs(v, lim) {
-  return v > lim ? lim : v < -lim ? -lim : v;
 }

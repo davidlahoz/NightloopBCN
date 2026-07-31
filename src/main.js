@@ -16,6 +16,7 @@ import { RoadChunks } from './city/roadChunks.js';
 import { groundHeight } from './city/roadProfile.js';
 import { params, defineParam, onParam } from './core/params.js';
 import { quality, setQualityAndReload } from './core/quality.js';
+import { buildBudget } from './core/buildBudget.js';
 import { Props } from './city/props.js';
 import { Skyline } from './city/skyline.js';
 import { Buildings } from './city/buildings.js';
@@ -67,21 +68,33 @@ async function main() {
   const roadMat = new RoadMaterial(scene, env);
   const roadChunks = new RoadChunks(scene, roadMat.material);
 
-  // city floor: dark ground under everything so no void is ever visible
+  // city floor: dark ground under everything so no void is ever visible.
+  // The city is endless, so the plane re-centres on the car in coarse snaps.
+  let cityFloor;
   {
-    const floor = BABYLON.MeshBuilder.CreateGround('cityFloor', { width: 2000, height: 2000 }, scene);
-    floor.position.y = -0.35;
+    cityFloor = BABYLON.MeshBuilder.CreateGround('cityFloor', { width: 3000, height: 3000 }, scene);
+    cityFloor.position.y = -0.35;
     const fm = new BABYLON.PBRMaterial('cityFloorMat', scene);
     fm.albedoColor = new BABYLON.Color3(0.020, 0.021, 0.024);
     fm.metallic = 0;
     fm.roughness = 0.95;
-    floor.material = fm;
-    floor.isPickable = false;
-    floor.freezeWorldMatrix();
-    floor.metadata = { nlNoShadow: true };
+    cityFloor.material = fm;
+    cityFloor.isPickable = false;
+    cityFloor.freezeWorldMatrix();
+    cityFloor.metadata = { nlNoShadow: true };
   }
+  const followCityFloor = (x, z) => {
+    const sx = Math.round(x / 400) * 400;
+    const sz = Math.round(z / 400) * 400;
+    if (sx !== cityFloor.position.x || sz !== cityFloor.position.z) {
+      cityFloor.unfreezeWorldMatrix();
+      cityFloor.position.set(sx, -0.35, sz);
+      cityFloor.computeWorldMatrix(true);
+      cityFloor.freezeWorldMatrix();
+    }
+  };
 
-  // city modules (buildings, curbs, skyline, props) integrate here as they land
+  // city modules (buildings, curbs, skyline, props) — all endless streamers
   /** @type {Array<{applyEnvironment:Function,update:Function}>} */
   const cityModules = [];
   const props = new Props(scene, env);
@@ -93,9 +106,25 @@ async function main() {
   const curbs = new Curbs(scene, env);
   cityModules.push(curbs);
 
-  // city lights → road shader light buffer
+  // populate the streamers around the spawn (behind the loading screen)
+  const SPAWN_X = 0, SPAWN_Z = -40;
+  props.prewarm(SPAWN_X, SPAWN_Z);
+  buildings.prewarm(SPAWN_X, SPAWN_Z);
+  curbs.prewarm(SPAWN_X, SPAWN_Z);
+
+  // city lights → road shader light buffer (nearest first: the buffer caps at
+  // 96 and the streamed region holds more than that)
+  let lightSelX = SPAWN_X, lightSelZ = SPAWN_Z;
+  const _allLights = [];
   const refreshRoadLights = () => {
-    roadMat.setLights([props.getStreetlightHeads(), buildings.getNeonLights()]);
+    _allLights.length = 0;
+    for (const L of props.getStreetlightHeads()) _allLights.push(L);
+    for (const L of buildings.getNeonLights()) _allLights.push(L);
+    const cx = lightSelX, cz = lightSelZ;
+    _allLights.sort((a, b) =>
+      ((a.x - cx) * (a.x - cx) + (a.z - cz) * (a.z - cz)) -
+      ((b.x - cx) * (b.x - cx) + (b.z - cz) * (b.z - cz)));
+    roadMat.setLights([_allLights]);
   };
   refreshRoadLights();
 
@@ -107,6 +136,13 @@ async function main() {
   const litter = new Litter(scene);
   cityModules.push(litter);
 
+  // streamed light sets changed → re-select buffer + rebuild halos
+  let lastLightsGen = props.lightsGen + buildings.lightsGen;
+  const refreshLightGeometry = () => {
+    refreshRoadLights();
+    glow.rebuild(props.getStreetlightHeads(), buildings.getNeonLights());
+  };
+
   // surface state buffer (tyres write, road reads)
   const surface = new SurfaceState(scene, roadMat);
   const tyreFX = new TyreFX(scene);
@@ -116,7 +152,7 @@ async function main() {
   const input = new Input(canvas);
   const stats = new FrameStats();
   const car = new Car(scene);
-  car.position.set(0, 0, -40);
+  car.position.set(SPAWN_X, 0, SPAWN_Z);
   const chase = new ChaseCamera(scene);
   const post = new PostChain(scene, chase.cam);
 
@@ -132,12 +168,12 @@ async function main() {
   const rain = new Rain(scene, env);
   defineParam('weatherScrub', -0.01, { label: 'transition scrub', section: 'weather', min: -0.01, max: 1, step: 0.01 });
   onParam('weatherScrub', (v) => { weather.scrub = v < 0 ? NaN : v; });
-  // boot directly into a state for capture tooling: ?state=N
+  // boot directly into a state for capture tooling: ?state=N (1 day, 2 afternoon, 3 night)
   const bootState = (() => {
     const s = parseInt(new URLSearchParams(location.search).get('state') ?? '', 10);
-    return s >= 1 && s <= 5 ? s : 2;
+    return s >= 1 && s <= 3 ? s : 3;
   })();
-  if (bootState !== 2) weather.jumpTo(bootState);
+  if (bootState !== 3) weather.jumpTo(bootState);
 
   // ---- mirror + shadow wiring ----
   const refreshRenderLists = () => {
@@ -177,7 +213,7 @@ async function main() {
   window.addEventListener('resize', () => engine.resize());
 
   // ---- debug / capture handle ----
-  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, engineAudio, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
+  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, engineAudio, props, buildings, curbs, skyline, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
   window.__NIGHTLOOP__ = NL;
   window.BABYLON = BABYLON; // debug console access
 
@@ -186,7 +222,7 @@ async function main() {
   // ---- pipeline warm-up: every weather-dependent pipeline renders at least
   // once behind the loading screen, so no mood key ever hitches ----
   {
-    // heaviest state first: rain + steam + cones + halos all alive
+    // heaviest state first: night (steam + cones + halos + rain pipeline)
     weather.jumpTo(3);
     rain.update(1 / 60, chase.cam, 1);
     steam.mesh.setEnabled(true);
@@ -201,7 +237,7 @@ async function main() {
     tyreFX.spray[0].emitRate = 0;
     tyreFX.spray[1].emitRate = 0;
     tyreFX.smoke.emitRate = 0;
-    weather.jumpTo(5);   // fog halos path
+    weather.jumpTo(1);   // full-sun day path
     scene.render();
     weather.jumpTo(bootState);
     rain.update(1 / 60, chase.cam, env.params.rainRate);
@@ -211,6 +247,7 @@ async function main() {
   // ---- main loop ----
   let lastT = performance.now();
   const MAX_STEP = 1 / 30;
+  let lastStreamGen = -1;
   engine.runRenderLoop(() => {
     const now = performance.now();
     let dt = (now - lastT) / 1000;
@@ -218,6 +255,7 @@ async function main() {
     lastT = now;
     if (dt > MAX_STEP) dt = MAX_STEP;
 
+    buildBudget.beginFrame();
     input.beginFrame();
     // scripted-capture hook: force a glide without real pointer events
     if (NL.debugGlide) {
@@ -283,6 +321,20 @@ async function main() {
     roadChunks.update(dt, car.position.x, car.position.z);
     for (let i = 0; i < cityModules.length; i++) {
       cityModules[i].update(dt, car.position.x, car.position.z);
+    }
+    followCityFloor(car.position.x, car.position.z);
+
+    // streamed world changed → refresh mirror/shadow lists + light buffers
+    const streamGen = roadChunks.generation + curbs.generation + buildings.generation;
+    if (streamGen !== lastStreamGen) {
+      lastStreamGen = streamGen;
+      refreshRenderLists();
+    }
+    const lightsGen = props.lightsGen + buildings.lightsGen;
+    if (lightsGen !== lastLightsGen) {
+      lastLightsGen = lightsGen;
+      lightSelX = car.position.x; lightSelZ = car.position.z;
+      refreshLightGeometry();
     }
 
     post.setSpeed(car.speed);
