@@ -55,8 +55,8 @@ const STATES = {
     ambientSky: [0.24, 0.30, 0.48], ambientGround: [0.16, 0.14, 0.14], ambientIntensity: 0.80,
     fogColor: [0.25, 0.25, 0.33], fogDensity: 0.0042, fogHeightFalloff: 0.05,
     exposure: 1.10, rainRate: 0,
-    wetnessTarget: 0.50, puddleLevel: 0.70,   // reached slowly — evaporation in real time
-    streetlightIntensity: 1.15, neonIntensity: 1.25, windowLitFraction: 0.5,
+    wetnessTarget: 0.55, puddleLevel: 0.80,   // reached slowly — evaporation in real time
+    streetlightIntensity: 1.3, neonIntensity: 1.45, windowLitFraction: 0.5,
     headlights: 1.0,
     steamAmount: 1,
   },

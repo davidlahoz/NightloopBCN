@@ -28,6 +28,38 @@ A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet 
 
 Visual quality is the product. If a requirement conflicts with beauty, break the requirement and note it in `DECISIONS.md`. Do not ship rough.
 
+## Run
+
+```sh
+npm install
+npm run dev        # http://localhost:5174  (Chrome desktop, WebGPU required)
+```
+
+## Controls
+
+| Input | Action |
+|---|---|
+| `W A S D` / arrows | throttle · steer · brake |
+| **hold RMB** (or Shift) | **Glide** — sustained low-anger drift; the mouse carves the line |
+| mouse | orbit camera (recentres while driving) |
+| scroll | camera zoom |
+| `C` | chase ↔ bumper camera |
+| `1–5` | mood states: Golden · Blue hour · Downpour · Afterglow · Fogbank |
+| `` ` `` / `F1` | settings + performance overlay |
+
+Weather states transition physically over ~11 s — the sun travels, fog
+thickens, rain fills the street, and the asphalt dries in real time after the
+rain stops. Everything the tyres do is written into a surface state buffer:
+water is displaced with a visible ridge, tracks disturb the reflections,
+drifts leave rubber arcs that persist for minutes.
+
+Quality presets (low / medium / high) live in the overlay; medium is the
+default. `?q=high` / `?q=low` and `?state=N` work as URL parameters.
+
+See `DECISIONS.md` for engineering choices, `PERF.md` for frame-budget
+measurements, `ASSETS.md` for vendored CC0 assets. Milestone screenshots are
+in `shots/`.
+
 ---
 
 *Built FULLY vibe-coded.*

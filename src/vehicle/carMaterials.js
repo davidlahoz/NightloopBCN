@@ -139,7 +139,7 @@ export class CarMaterials {
     rear.metallic = 0;
     rear.roughness = 0.2;
     rear.emissiveColor = new Color3(1.0, 0.05, 0.06);
-    rear.emissiveIntensity = 1.6;
+    rear.emissiveIntensity = 1.0;
     this.rearLight = rear;
 
     const front = new PBRMaterial('nlCarFrontLight', scene);
@@ -153,7 +153,7 @@ export class CarMaterials {
 
   /** brake lights flare when braking; headlights scale with weather */
   setBrake(on) {
-    this.rearLight.emissiveIntensity = on ? 5.5 : 1.6;
+    this.rearLight.emissiveIntensity = on ? 5.5 : 1.0;
   }
 
   setHeadlights(intensity) {
