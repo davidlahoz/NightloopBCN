@@ -9,15 +9,18 @@ import { FrameStats } from './core/stats.js';
 import { Overlay } from './ui/overlay.js';
 import { Car } from './vehicle/car.js';
 import { ChaseCamera } from './camera/chaseCamera.js';
-import groundVertex from './shaders/placeholderGround.vertex.wgsl?raw';
-import groundFragment from './shaders/placeholderGround.fragment.wgsl?raw';
+import { Environment } from './weather/environment.js';
+import { PostChain } from './post/postChain.js';
+import { RoadMaterial } from './city/roadMaterial.js';
+import { RoadChunks } from './city/roadChunks.js';
+import { groundHeight } from './city/roadProfile.js';
+import { Props } from './city/props.js';
+import { Skyline } from './city/skyline.js';
+import { Buildings } from './city/buildings.js';
+import { Curbs } from './city/curbs.js';
+import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
-
-/** Flat placeholder ground query — replaced by the road heightfield in M2. */
-function groundHeight(x, z) {
-  return 0;
-}
 
 async function main() {
   if (!navigator.gpu) {
@@ -32,57 +35,72 @@ async function main() {
     stencil: false,
   });
   await engine.initAsync();
-  loadingScreen.set(0.25, 'engine ready');
+  loadingScreen.set(0.2, 'engine ready');
 
   const scene = new BABYLON.Scene(engine);
   scene.clearColor = new BABYLON.Color4(0.05, 0.06, 0.085, 1);
   scene.skipPointerMovePicking = true;
-  scene.ambientColor = new BABYLON.Color3(0.1, 0.12, 0.16);
+  scene.autoClearDepthAndStencil = true;
 
-  // ---- placeholder world (M1) ----
-  BABYLON.ShaderStore.ShadersStoreWGSL['placeholderGroundVertexShader'] = groundVertex;
-  BABYLON.ShaderStore.ShadersStoreWGSL['placeholderGroundFragmentShader'] = groundFragment;
-  const groundMat = new BABYLON.ShaderMaterial('placeholderGround', scene, {
-    vertex: 'placeholderGround',
-    fragment: 'placeholderGround',
-  }, {
-    attributes: ['position'],
-    uniformBuffers: ['Scene', 'Mesh'],
-    shaderLanguage: BABYLON.ShaderLanguage.WGSL,
-  });
-  const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 1200, height: 1200 }, scene);
-  ground.material = groundMat;
-  ground.freezeWorldMatrix();
+  // shared WGSL helpers must exist before any material compiles
+  BABYLON.ShaderStore.IncludesShadersStoreWGSL['nlCommon'] = commonWgsl;
 
-  // a few blocks for parallax reference
-  const blockMat = new BABYLON.StandardMaterial('block', scene);
-  blockMat.diffuseColor = new BABYLON.Color3(0.09, 0.1, 0.12);
-  blockMat.specularColor = new BABYLON.Color3(0.05, 0.05, 0.06);
-  const rng = mulberry32(1234);
-  for (let i = 0; i < 40; i++) {
-    const w = 8 + rng() * 18, h = 8 + rng() * 30, d = 8 + rng() * 18;
-    const b = BABYLON.MeshBuilder.CreateBox('b' + i, { width: w, height: h, depth: d }, scene);
-    const ring = 60 + rng() * 240;
-    const ang = rng() * Math.PI * 2;
-    b.position.set(Math.cos(ang) * ring, h / 2, Math.sin(ang) * ring);
-    b.material = blockMat;
-    b.freezeWorldMatrix();
-  }
+  // ---- world systems ----
+  loadingScreen.set(0.3, 'building the city');
+  const env = new Environment(scene);
+  const roadMat = new RoadMaterial(scene, env);
+  const roadChunks = new RoadChunks(scene, roadMat.material);
 
-  // ---- lights (placeholder until M2) ----
-  const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-0.4, -0.35, 0.6), scene);
-  sun.intensity = 1.6;
-  sun.diffuse = new BABYLON.Color3(1.0, 0.72, 0.45);
-  const amb = new BABYLON.HemisphericLight('amb', new BABYLON.Vector3(0, 1, 0), scene);
-  amb.intensity = 0.55;
-  amb.diffuse = new BABYLON.Color3(0.45, 0.55, 0.75);
-  amb.groundColor = new BABYLON.Color3(0.12, 0.12, 0.15);
+  // city modules (buildings, curbs, skyline, props) integrate here as they land
+  /** @type {Array<{applyEnvironment:Function,update:Function}>} */
+  const cityModules = [];
+  const props = new Props(scene, env);
+  cityModules.push(props);
+  const skyline = new Skyline(scene, env);
+  cityModules.push(skyline);
+  const buildings = new Buildings(scene, env);
+  cityModules.push(buildings);
+  const curbs = new Curbs(scene, env);
+  cityModules.push(curbs);
 
-  // ---- systems ----
+  // city lights → road shader light buffer
+  const refreshRoadLights = () => {
+    roadMat.setLights([props.getStreetlightHeads(), buildings.getNeonLights()]);
+  };
+  refreshRoadLights();
+
+  // ---- vehicle + camera ----
   const input = new Input(canvas);
   const stats = new FrameStats();
   const car = new Car(scene);
+  car.position.set(0, 0, -40);
   const chase = new ChaseCamera(scene);
+  const post = new PostChain(scene, chase.cam);
+
+  // ---- mirror + shadow wiring ----
+  const refreshRenderLists = () => {
+    // mirror: everything except the road itself (the road can't reflect itself)
+    const list = [];
+    for (const m of scene.meshes) {
+      if (m.name.startsWith('road_')) continue;
+      if (m.metadata && m.metadata.nlNoMirror) continue;
+      list.push(m);
+    }
+    roadMat.mirror.renderList = list;
+    // sun shadow casters: near-field geometry only
+    const sm = env.shadow.getShadowMap();
+    sm.renderList = [];
+    for (const m of scene.meshes) {
+      if (m.name.startsWith('road_') || m === env.sky) continue;
+      if (m.name.toLowerCase().includes('skyline')) continue;
+      if (m.metadata && m.metadata.nlNoShadow) continue;
+      sm.renderList.push(m);
+    }
+  };
+  refreshRenderLists();
+
+  loadingScreen.set(0.55, 'paving the streets');
+  roadChunks.prewarm(car.position.x, car.position.z);
 
   const inst = new BABYLON.SceneInstrumentation(scene);
   const counterResult = { draws: 0, tris: 0, meshes: 0 };
@@ -97,10 +115,11 @@ async function main() {
   window.addEventListener('resize', () => engine.resize());
 
   // ---- debug / capture handle ----
-  const NL = { engine, scene, car, chase, ready: false, frame: 0 };
+  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, ready: false, frame: 0, refreshRenderLists, cityModules };
   window.__NIGHTLOOP__ = NL;
+  window.BABYLON = BABYLON; // debug console access
 
-  loadingScreen.set(0.7, 'compiling pipelines');
+  loadingScreen.set(0.85, 'compiling pipelines');
 
   // ---- main loop ----
   let lastT = performance.now();
@@ -117,24 +136,23 @@ async function main() {
     chase.update(dt, car, input, groundHeight);
     input.endFrame();
 
+    env.update(dt);
+    env.updateShadowFollow(car.position.x, car.position.z);
+    roadMat.update(dt, env, car.position.x, car.position.z, car.position.y);
+    roadChunks.update(dt, car.position.x, car.position.z);
+    for (let i = 0; i < cityModules.length; i++) {
+      cityModules[i].update(dt, car.position.x, car.position.z);
+    }
+
     scene.render();
     overlay.update(now);
 
     NL.frame++;
-    if (!NL.ready && NL.frame === 5) {
+    if (!NL.ready && NL.frame === 8) {
       loadingScreen.hide();
       NL.ready = true;
     }
   });
-}
-
-function mulberry32(a) {
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 main().catch((e) => {
