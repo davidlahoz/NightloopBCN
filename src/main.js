@@ -27,6 +27,7 @@ import { Glow } from './vfx/glow.js';
 import { Steam } from './vfx/steam.js';
 import { TyreFX } from './vfx/spray.js';
 import { Litter } from './vfx/litter.js';
+import { HeadlightCones } from './vfx/headlightCones.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -117,16 +118,20 @@ async function main() {
   const chase = new ChaseCamera(scene);
   const post = new PostChain(scene, chase.cam);
 
+  // volumetric headlight cones (rain/fog only)
+  const cones = new HeadlightCones(scene, car);
+
   // weather/mood states (keys 1–5) — drives env params + physical wet lag
   const weather = new WeatherSystem(env, [...cityModules, roadMat], post, refreshRoadLights);
   const rain = new Rain(scene, env);
   defineParam('weatherScrub', -0.01, { label: 'transition scrub', section: 'weather', min: -0.01, max: 1, step: 0.01 });
   onParam('weatherScrub', (v) => { weather.scrub = v < 0 ? NaN : v; });
   // boot directly into a state for capture tooling: ?state=N
-  {
+  const bootState = (() => {
     const s = parseInt(new URLSearchParams(location.search).get('state') ?? '', 10);
-    if (s >= 1 && s <= 5) weather.jumpTo(s);
-  }
+    return s >= 1 && s <= 5 ? s : 2;
+  })();
+  if (bootState !== 2) weather.jumpTo(bootState);
 
   // ---- mirror + shadow wiring ----
   const refreshRenderLists = () => {
@@ -175,15 +180,19 @@ async function main() {
   // ---- pipeline warm-up: every weather-dependent pipeline renders at least
   // once behind the loading screen, so no mood key ever hitches ----
   {
-    rain.mesh.setEnabled(true);
-    rain.material.setFloat('rainRate', 1);
+    // heaviest state first: rain + steam + cones + halos all alive
+    weather.jumpTo(3);
+    rain.update(1 / 60, chase.cam, 1);
     steam.mesh.setEnabled(true);
     steam.material.setFloat('amount', 1);
+    cones.applyEnvironment(env, 1.2);
     scene.render();
     scene.render();
-    rain.mesh.setEnabled(false);
-    rain.material.setFloat('rainRate', 0);
-    weather._push();
+    weather.jumpTo(5);   // fog halos path
+    scene.render();
+    weather.jumpTo(bootState);
+    rain.update(1 / 60, chase.cam, env.params.rainRate);
+    scene.render();
   }
 
   // ---- main loop ----
@@ -256,6 +265,7 @@ async function main() {
       roadMat.material.setVector4('headlightTip0', roadMat._ht0);
       roadMat.material.setVector4('headlightTip1', roadMat._ht1);
       car.materials.setHeadlights(hlI);
+      cones.applyEnvironment(env, hlI);
     }
     input.endFrame();
     roadChunks.update(dt, car.position.x, car.position.z);

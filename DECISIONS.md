@@ -14,3 +14,7 @@ Deviations from the brief and notable technical choices, one line each.
 - **HDR shader outputs clamped ≤120** — anything above half-float max poisons the bloom chain with NaN tiles (this bug shipped as a "black box in the sky" for an afternoon).
 - **Motion blur is screen-space (camera) not per-object** — in a chase-cam driving demo the camera IS the motion; per-object adds a geometry velocity buffer for marginal gain. Revisit only if wheel blur is missed.
 - **Weather wetness/puddles integrate with first-order lag, never blended** — rain fills fast (τ≈7s), drying is slow (τ≈45–70s×evaporation), so the street stays soaked after rain stops and dries in real time.
+- **No SSAO** — night scene is emissive-dominated; contact grounding comes from the AO blob, baked facade grime and canyon shadows. SSAO's cost on the lowered hardware target buys almost nothing here.
+- **FXAA + post-sharpen instead of TAA** — TAA on a fast chase camera without full motion vectors ghosts the one thing that must stay crisp (the car); glints are hash-stable in world space so the main TAA benefit is moot.
+- **No DoF** — "very restrained" at driving FOV/speeds rounds to off; dropped for clarity and frame budget.
+- **Glide alt input: Shift** — RMB stays primary; Shift serves trackpads (and synthetic-event test rigs which cannot deliver right-button events).

@@ -17,6 +17,8 @@ defineParam('ppFxaa', true, { label: 'fxaa', section: 'post' });
 defineParam('ppVignette', 0.28, { label: 'vignette', section: 'post', min: 0, max: 1, step: 0.02 });
 defineParam('ppContrast', 1.08, { label: 'contrast', section: 'post', min: 0.5, max: 2, step: 0.02 });
 defineParam('ppMotionBlur', 0.55, { label: 'motion blur', section: 'post', min: 0, max: 2, step: 0.05 });
+defineParam('ppGrain', 6.5, { label: 'film grain', section: 'post', min: 0, max: 20, step: 0.5 });
+defineParam('ppSharpen', 0.14, { label: 'sharpen', section: 'post', min: 0, max: 0.6, step: 0.02 });
 
 export class PostChain {
   /**
@@ -49,6 +51,16 @@ export class PostChain {
     ip.vignetteEnabled = true;
     ip.vignetteWeight = params.ppVignette * 4;
     ip.vignetteCameraFov = 0.9;
+
+    // subtle animated grain + post-AA sharpening close the chain
+    pp.grainEnabled = params.ppGrain > 0.01;
+    pp.grain.intensity = params.ppGrain;
+    pp.grain.animated = true;
+    pp.sharpenEnabled = params.ppSharpen > 0.001;
+    pp.sharpen.edgeAmount = params.ppSharpen;
+    pp.sharpen.colorAmount = 1.0;
+    onParam('ppGrain', (v) => { pp.grainEnabled = v > 0.01; pp.grain.intensity = v; });
+    onParam('ppSharpen', (v) => { pp.sharpenEnabled = v > 0.001; pp.sharpen.edgeAmount = v; });
 
     onParam('ppExposure', (v) => { ip.exposure = v; });
     onParam('ppContrast', (v) => { ip.contrast = v; });
