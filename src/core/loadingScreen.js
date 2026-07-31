@@ -13,8 +13,13 @@ export const loadingScreen = {
   hide() {
     this.set(1, 'ready');
     this._root.classList.add('hidden');
-    // remove from DOM after fade completes so it costs nothing
-    setTimeout(() => this._root.remove(), 1600);
+    // remove from DOM after fade completes so it costs nothing,
+    // then reveal the persistent in-game controls hint
+    setTimeout(() => {
+      this._root.remove();
+      const hint = document.getElementById('controls-hint');
+      if (hint) hint.classList.add('visible');
+    }, 1600);
   },
 
   showNoWebGPU() {

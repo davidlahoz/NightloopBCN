@@ -56,6 +56,17 @@
       align-items: center; justify-content: center;
       font-size: 14px; letter-spacing: 0.06em;
     }
+    /* ---------- in-game controls hint ---------- */
+    #controls-hint {
+      position: fixed; left: 0; right: 0; bottom: 18px; z-index: 40;
+      text-align: center; pointer-events: none; user-select: none;
+      color: rgba(216, 222, 233, 0.30);
+      font-size: 11px; letter-spacing: 0.14em; line-height: 1.9;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+      opacity: 0; transition: opacity 1.2s ease;
+    }
+    #controls-hint.visible { opacity: 1; }
+    #controls-hint span { color: rgba(242, 192, 120, 0.55); }
   </style>
 </head>
 <body>
@@ -69,6 +80,9 @@
     </div>
   </div>
   <div id="nogpu">This demo requires WebGPU. Use Chrome on desktop.</div>
+  <div id="controls-hint">
+    <span>wasd</span> drive &nbsp;·&nbsp; <span>hold rmb</span> glide &nbsp;·&nbsp; <span>1–5</span> weather &nbsp;·&nbsp; <span>c</span> camera &nbsp;·&nbsp; <span>`</span> settings
+  </div>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
