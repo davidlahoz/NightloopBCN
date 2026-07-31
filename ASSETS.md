@@ -4,7 +4,11 @@ Every third-party asset vendored into this repository, with source and licence.
 
 Texture sets follow the module convention (`docs/MODULE_NOTES.md`): each set
 directory contains `color.jpg`, `normal.jpg` (OpenGL-convention, from
-ambientCG `NormalGL`), `roughness.jpg` and `ao.jpg`, all 2048x2048 JPEG.
+ambientCG `NormalGL`), `roughness.jpg` and `ao.jpg`. Originally vendored at
+2048², later downscaled to their on-screen footprint to cut web traffic
+(71 MB → 13 MB total assets): asphalt 1400² (hero surface), concrete and
+paving 1024², metal 512². Re-download from the source URLs below if full
+resolution is ever needed.
 
 | Asset | Path | Source URL | Asset ID | Licence |
 |---|---|---|---|---|
