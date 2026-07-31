@@ -13,13 +13,14 @@ import { Plane } from '@babylonjs/core/Maths/math.plane.js';
 import { Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector.js';
 import { Constants } from '@babylonjs/core/Engines/constants.js';
 import { defineParam, params } from '../core/params.js';
+import { quality } from '../core/quality.js';
 import roadVertex from '../shaders/road.vertex.wgsl?raw';
 import roadFragment from '../shaders/road.fragment.wgsl?raw';
 import commonWgsl from '../shaders/common.wgsl?raw';
 
 defineParam('roadWetness', 0.55, { label: 'wetness', section: 'road', min: 0, max: 1, step: 0.01 });
 defineParam('roadPuddles', 0.55, { label: 'puddle level', section: 'road', min: 0, max: 1, step: 0.01 });
-defineParam('roadGlints', 0.7, { label: 'glint intensity', section: 'road', min: 0, max: 2, step: 0.05 });
+defineParam('roadGlints', quality.glintDefault, { label: 'glint intensity', section: 'road', min: 0, max: 2, step: 0.05 });
 defineParam('roadRefl', 0.85, { label: 'reflection', section: 'road', min: 0, max: 2, step: 0.05 });
 defineParam('roadMarkWear', 0.55, { label: 'marking wear', section: 'road', min: 0, max: 1, step: 0.01 });
 
@@ -73,7 +74,7 @@ export class RoadMaterial {
 
     // ---- planar mirror ----
     // HDR half-float mirror with trilinear mips (roughness-blurred sampling)
-    this.mirror = new MirrorTexture('roadMirror', { ratio: 0.5 }, scene, true,
+    this.mirror = new MirrorTexture('roadMirror', { ratio: quality.mirrorRatio }, scene, true,
       Constants.TEXTURETYPE_HALF_FLOAT, Texture.TRILINEAR_SAMPLINGMODE);
     this.mirror.mirrorPlane = new Plane(0, -1, 0, 0);
     this.mirror.level = 1;
@@ -91,7 +92,7 @@ export class RoadMaterial {
 
     // ---- static-ish uniforms ----
     mat.setFloat('time', 0);
-    mat.setFloat('shadowMapSize', 4096);
+    mat.setFloat('shadowMapSize', quality.shadowSize);
     // sun ortho near/far — used to reconstruct the light-view depth metric
     this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMaxZ);
     mat.setVector2('shadowDV', this._shadowDV);
@@ -121,10 +122,11 @@ export class RoadMaterial {
    */
   setLights(lists) {
     let n = 0;
+    const cap = Math.min(MAX_LIGHTS, quality.maxLights);
     const d = this.lightData;
     for (let li = 0; li < lists.length; li++) {
       const arr = lists[li];
-      for (let i = 0; i < arr.length && n < MAX_LIGHTS; i++) {
+      for (let i = 0; i < arr.length && n < cap; i++) {
         const L = arr[i];
         const o = n * 8;
         d[o] = L.x; d[o + 1] = L.y; d[o + 2] = L.z; d[o + 3] = L.radius;

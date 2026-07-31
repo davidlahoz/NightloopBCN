@@ -18,11 +18,12 @@ import {
   sampleRoadSpace, streetSegments,
 } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
+import { quality } from '../core/quality.js';
 
-const LOD0_STEP = 0.075;
+const LOD0_STEP = quality.lod0Step;   // 0 disables LOD0 entirely
 const LOD1_STEP = 0.30;
-const RING0 = 52;          // build LOD0 inside this distance
-const RING0_DROP = 68;     // drop LOD0 beyond this
+const RING0 = quality.lod0Ring;       // build LOD0 inside this distance
+const RING0_DROP = quality.lod0Ring + 16;
 const PIECE_LEN = 22;      // street chunk length target
 const SKIRT = 0.06;        // skirt drop (m)
 const BUILD_BUDGET_MS = 2.6;
@@ -70,6 +71,7 @@ export class RoadChunks {
 
   /** Per-frame LOD management under a strict time budget. */
   update(dt, carX, carZ) {
+    if (LOD0_STEP === 0) return; // low preset: LOD1 everywhere
     // continue an in-progress build first
     const t0 = performance.now();
     if (this._building) {
@@ -112,6 +114,7 @@ export class RoadChunks {
 
   /** Build every LOD0 ring chunk synchronously (loading-screen warmup). */
   prewarm(carX, carZ) {
+    if (LOD0_STEP === 0) return;
     for (const c of this.chunks) {
       if (c.distanceTo(carX, carZ) < RING0) {
         c.setMesh(0, c.build(LOD0_STEP));

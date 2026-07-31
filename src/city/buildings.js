@@ -126,6 +126,7 @@ export class Buildings {
       this.material.setTexture('sunShadowMap', env.shadow.getShadowMap());
       this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMaxZ);
       this.material.setVector2('shadowDV', this._shadowDV);
+      this.material.setFloat('shadowMapSize', env.shadow.getShadowMap().getSize().width);
       this.material.setMatrix('sunShadowMatrix', env.shadow.getTransformMatrix());
     }
 

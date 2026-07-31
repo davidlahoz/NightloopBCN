@@ -7,6 +7,7 @@
 import { DefaultRenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline.js';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration.js';
 import { defineParam, params, onParam } from '../core/params.js';
+import { quality } from '../core/quality.js';
 
 defineParam('ppExposure', 1.35, { label: 'exposure', section: 'post', min: 0.2, max: 3, step: 0.05 });
 defineParam('ppBloom', true, { label: 'bloom', section: 'post' });
@@ -28,7 +29,7 @@ export class PostChain {
     pp.bloomEnabled = params.ppBloom;
     pp.bloomThreshold = 0.9;
     pp.bloomWeight = params.ppBloomWeight;
-    pp.bloomKernel = 64;
+    pp.bloomKernel = quality.bloomKernel;
     pp.bloomScale = 0.5;
 
     const ip = pp.imageProcessing;

@@ -15,13 +15,14 @@ import { EffectRenderer, EffectWrapper } from '@babylonjs/core/Materials/effectR
 import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { defineParam, params } from '../core/params.js';
+import { quality } from '../core/quality.js';
 import stateFragment from '../shaders/surfaceState.fragment.wgsl?raw';
 
 defineParam('stateEvaporation', 0.5, { label: 'evaporation', section: 'surface', min: 0, max: 2, step: 0.05 });
 defineParam('stateRubberStrength', 1.0, { label: 'rubber strength', section: 'surface', min: 0, max: 3, step: 0.05 });
 defineParam('stateRidgeStrength', 1.0, { label: 'ridge strength', section: 'surface', min: 0, max: 3, step: 0.05 });
 
-const SIZE = 2048;
+const SIZE = quality.stateSize;
 const HALF_EXTENT = 40;         // buffer covers ±40 m around the car
 const MAX_SPLATS = 8;
 

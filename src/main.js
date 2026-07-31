@@ -14,7 +14,8 @@ import { PostChain } from './post/postChain.js';
 import { RoadMaterial } from './city/roadMaterial.js';
 import { RoadChunks } from './city/roadChunks.js';
 import { groundHeight } from './city/roadProfile.js';
-import { params } from './core/params.js';
+import { params, defineParam, onParam } from './core/params.js';
+import { quality, setQualityAndReload } from './core/quality.js';
 import { Props } from './city/props.js';
 import { Skyline } from './city/skyline.js';
 import { Buildings } from './city/buildings.js';
@@ -37,6 +38,10 @@ async function main() {
     stencil: false,
   });
   await engine.initAsync();
+  if (quality.renderScale !== 1) engine.setHardwareScalingLevel(quality.renderScale);
+  // quality preset selector (stores + reloads — pipelines are built per preset)
+  defineParam('qualityPreset', quality.name, { label: 'quality (reloads)', section: 'post', options: ['low', 'medium', 'high'] });
+  onParam('qualityPreset', (v) => { if (v !== quality.name) setQualityAndReload(v); });
   loadingScreen.set(0.2, 'engine ready');
 
   const scene = new BABYLON.Scene(engine);

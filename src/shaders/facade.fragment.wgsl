@@ -31,6 +31,7 @@ uniform windowLitFraction : f32;
 uniform time : f32;
 uniform sunShadowMatrix : mat4x4<f32>;
 uniform shadowDV : vec2f;
+uniform shadowMapSize : f32;
 
 var sunShadowMap : texture_2d<f32>;   // FILTER_NONE float map (textureLoad only)
 
@@ -318,7 +319,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     if (suv.x > 0.002 && suv.x < 0.998 && suv.y > 0.002 && suv.y < 0.998) {
       let viewZ = sp.z * (uniforms.shadowDV.y - uniforms.shadowDV.x) + uniforms.shadowDV.x;
       let refM = (viewZ + uniforms.shadowDV.x) / (uniforms.shadowDV.x + uniforms.shadowDV.y);
-      let ip = vec2<i32>(suv * 4096.0);
+      let ip = vec2<i32>(suv * uniforms.shadowMapSize);
       var sh = 0.0;
       sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip, 0).r + 0.0013);
       sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip + vec2<i32>(2, 1), 0).r + 0.0013);

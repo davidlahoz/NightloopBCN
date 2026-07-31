@@ -10,7 +10,8 @@ import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import { Color3, Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { quality } from '../core/quality.js';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
 import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
@@ -81,7 +82,7 @@ export class Environment {
     // FILTER_NONE float map: depth metric in R; the road shader does its own
     // 9-tap PCF via textureLoad, stock materials get hard-edge shadows (fine
     // at their footprint).
-    this.shadow = new ShadowGenerator(4096, this.sun);
+    this.shadow = new ShadowGenerator(quality.shadowSize, this.sun);
     this.shadow.bias = 0.0018;
     this.shadow.normalBias = 0.03;
 
