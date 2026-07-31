@@ -5,6 +5,7 @@
  * the only place tone mapping happens.
  */
 import { DefaultRenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline.js';
+import { MotionBlurPostProcess } from '@babylonjs/core/PostProcesses/motionBlurPostProcess.js';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration.js';
 import { defineParam, params, onParam } from '../core/params.js';
 import { quality } from '../core/quality.js';
@@ -15,6 +16,7 @@ defineParam('ppBloomWeight', 0.25, { label: 'bloom weight', section: 'post', min
 defineParam('ppFxaa', true, { label: 'fxaa', section: 'post' });
 defineParam('ppVignette', 0.28, { label: 'vignette', section: 'post', min: 0, max: 1, step: 0.02 });
 defineParam('ppContrast', 1.08, { label: 'contrast', section: 'post', min: 0.5, max: 2, step: 0.02 });
+defineParam('ppMotionBlur', 0.55, { label: 'motion blur', section: 'post', min: 0, max: 2, step: 0.05 });
 
 export class PostChain {
   /**
@@ -22,6 +24,13 @@ export class PostChain {
    * @param {import('@babylonjs/core').Camera} camera
    */
   constructor(scene, camera) {
+    // camera/screen motion blur — runs before the tonemapping pipeline
+    this.motionBlur = new MotionBlurPostProcess('nlMB', scene, 1.0, camera);
+    this.motionBlur.isObjectBased = false;
+    this.motionBlur.motionStrength = 0;
+    this.motionBlur.motionBlurSamples = 14;
+    this._mbSpeed = 0;
+
     const pp = new DefaultRenderingPipeline('nlPost', true, scene, [camera]);
     this.pipeline = pp;
 
@@ -52,5 +61,11 @@ export class PostChain {
   /** Weather states drive exposure through this. */
   setExposure(v) {
     this.pipeline.imageProcessing.exposure = v * params.ppExposure;
+  }
+
+  /** Speed-scaled motion blur (called per frame from the main loop). */
+  setSpeed(speed) {
+    const t = Math.min(1, speed / 32);
+    this.motionBlur.motionStrength = params.ppMotionBlur * t * t * 1.2;
   }
 }

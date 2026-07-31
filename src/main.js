@@ -21,6 +21,11 @@ import { Skyline } from './city/skyline.js';
 import { Buildings } from './city/buildings.js';
 import { Curbs } from './city/curbs.js';
 import { SurfaceState } from './surface/stateBuffer.js';
+import { WeatherSystem } from './weather/states.js';
+import { Rain } from './weather/rain.js';
+import { Glow } from './vfx/glow.js';
+import { Steam } from './vfx/steam.js';
+import { TyreFX } from './vfx/spray.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -90,8 +95,16 @@ async function main() {
   };
   refreshRoadLights();
 
+  // atmosphere VFX
+  const glow = new Glow(scene, props.getStreetlightHeads(), buildings.getNeonLights());
+  cityModules.push(glow);
+  const steam = new Steam(scene);
+  cityModules.push(steam);
+
   // surface state buffer (tyres write, road reads)
   const surface = new SurfaceState(scene, roadMat);
+  const tyreFX = new TyreFX(scene);
+
 
   // ---- vehicle + camera ----
   const input = new Input(canvas);
@@ -100,6 +113,12 @@ async function main() {
   car.position.set(0, 0, -40);
   const chase = new ChaseCamera(scene);
   const post = new PostChain(scene, chase.cam);
+
+  // weather/mood states (keys 1–5) — drives env params + physical wet lag
+  const weather = new WeatherSystem(env, [...cityModules, roadMat], post, refreshRoadLights);
+  const rain = new Rain(scene, env);
+  defineParam('weatherScrub', -0.01, { label: 'transition scrub', section: 'weather', min: -0.01, max: 1, step: 0.01 });
+  onParam('weatherScrub', (v) => { weather.scrub = v < 0 ? NaN : v; });
 
   // ---- mirror + shadow wiring ----
   const refreshRenderLists = () => {
@@ -145,6 +164,20 @@ async function main() {
 
   loadingScreen.set(0.85, 'compiling pipelines');
 
+  // ---- pipeline warm-up: every weather-dependent pipeline renders at least
+  // once behind the loading screen, so no mood key ever hitches ----
+  {
+    rain.mesh.setEnabled(true);
+    rain.material.setFloat('rainRate', 1);
+    steam.mesh.setEnabled(true);
+    steam.material.setFloat('amount', 1);
+    scene.render();
+    scene.render();
+    rain.mesh.setEnabled(false);
+    rain.material.setFloat('rainRate', 0);
+    weather._push();
+  }
+
   // ---- main loop ----
   let lastT = performance.now();
   const MAX_STEP = 1 / 30;
@@ -181,16 +214,37 @@ async function main() {
       }
     }
     surface.update(dt, car.position.x, car.position.z, env.params);
-    input.endFrame();
+    tyreFX.update(dt, car, params.roadWetness);
 
+    weather.update(dt, input);
+    rain.update(dt, chase.cam, env.params.rainRate);
     env.update(dt);
     env.updateShadowFollow(car.position.x, car.position.z);
     roadMat.update(dt, env, car.position.x, car.position.z, car.position.y);
+
+    // headlights → road shader (positions in world space, beams aimed ahead)
+    {
+      const cy2 = Math.cos(car.yaw), sy2 = Math.sin(car.yaw);
+      const px = car.position.x, py = car.position.y, pz = car.position.z;
+      const hlI = weather.headlights;
+      const setHL = (v, lx, ly, lz, w) => { v.x = px + lx * cy2 + lz * sy2; v.y = py + ly; v.z = pz - lx * sy2 + lz * cy2; v.w = w; };
+      setHL(roadMat._hl0, -0.62, 0.68, 2.05, hlI);
+      setHL(roadMat._hl1, 0.62, 0.68, 2.05, hlI);
+      setHL(roadMat._ht0, -0.55, 0.0, 26, 0);
+      setHL(roadMat._ht1, 0.55, 0.0, 26, 0);
+      roadMat.material.setVector4('headlight0', roadMat._hl0);
+      roadMat.material.setVector4('headlight1', roadMat._hl1);
+      roadMat.material.setVector4('headlightTip0', roadMat._ht0);
+      roadMat.material.setVector4('headlightTip1', roadMat._ht1);
+      car.materials.setHeadlights(hlI);
+    }
+    input.endFrame();
     roadChunks.update(dt, car.position.x, car.position.z);
     for (let i = 0; i < cityModules.length; i++) {
       cityModules[i].update(dt, car.position.x, car.position.z);
     }
 
+    post.setSpeed(car.speed);
     scene.render();
     overlay.update(now);
 
