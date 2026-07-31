@@ -35,11 +35,21 @@ export class Input {
       this.rmb = false; this.lmb = false;
     });
 
-    canvas.addEventListener('mousemove', (e) => {
-      this._accDX += e.movementX;
-      this._accDY += e.movementY;
+    this._lastCX = NaN;
+    this._lastCY = NaN;
+    window.addEventListener('mousemove', (e) => {
+      // synthetic/test events may carry movementX = 0 — fall back to client deltas
+      let dx = e.movementX, dy = e.movementY;
+      if (!dx && !dy && Number.isFinite(this._lastCX)) {
+        dx = e.clientX - this._lastCX;
+        dy = e.clientY - this._lastCY;
+      }
+      this._lastCX = e.clientX;
+      this._lastCY = e.clientY;
+      this._accDX += dx || 0;
+      this._accDY += dy || 0;
     });
-    canvas.addEventListener('mousedown', (e) => {
+    window.addEventListener('mousedown', (e) => {
       if (e.button === 2) this.rmb = true;
       if (e.button === 0) this.lmb = true;
     });
@@ -71,6 +81,9 @@ export class Input {
   axis(posCode, negCode) {
     return (this.down[posCode] ? 1 : 0) - (this.down[negCode] ? 1 : 0);
   }
+
+  /** Glide is RMB or Shift (trackpad-friendly alternative). */
+  get gliding() { return this.rmb || !!this.down['ShiftLeft'] || !!this.down['ShiftRight']; }
 
   get throttle() { return this.down['KeyW'] || this.down['ArrowUp'] ? 1 : 0; }
   get brake() { return this.down['KeyS'] || this.down['ArrowDown'] ? 1 : 0; }

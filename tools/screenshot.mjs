@@ -71,6 +71,17 @@ if (process.env.DRIVE) {
   await page.keyboard.down('w');
   if (process.env.DRIVE === 'straight') {
     await page.waitForTimeout(2600);
+  } else if (process.env.DRIVE === 'drift') {
+    await page.waitForTimeout(parseInt(process.env.RUNUP_MS ?? '2400', 10));
+    await page.keyboard.down('Shift');
+    await page.keyboard.down('a');
+    await page.waitForTimeout(parseInt(process.env.DRIFT_MS ?? '1900', 10));
+    if (process.env.DRIFT_END) {
+      await page.keyboard.up('a');
+      await page.keyboard.up('Shift');
+      await page.keyboard.up('w');
+      await page.waitForTimeout(700);
+    }
   } else {
     await page.waitForTimeout(2200);
     await page.keyboard.down('a');

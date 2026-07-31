@@ -13,6 +13,7 @@ import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTextur
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Vector3, Quaternion } from '@babylonjs/core/Maths/math.vector.js';
 import { defineParam, params } from '../core/params.js';
+import { sampleRoadSpace } from '../city/cityPlan.js';
 import { buildCarBody } from './carBody.js';
 import { buildWheel } from './carWheels.js';
 import { CarMaterials } from './carMaterials.js';
@@ -30,6 +31,9 @@ const TRACK = 1.56;   // slightly wider than spec: plants the tyres flush with t
 const WHEEL_R = 0.325;
 
 const DAMP = (rate, dt) => 1 - Math.exp(-rate * dt);
+const CURB_MARGIN = 0.92;   // keep the body this far inside the curb face
+const _crs = { iA: 0, tA: 0, dA: 0, iB: 0, tB: 0, dB: 0, d: 0, wB: 0 };
+const _crs2 = { iA: 0, tA: 0, dA: 0, iB: 0, tB: 0, dB: 0, d: 0, wB: 0 };
 
 export class Car {
   /** @param {import('@babylonjs/core').Scene} scene */
@@ -174,16 +178,18 @@ export class Car {
    */
   update(dt, input, groundHeight) {
     // ---- steering (mouse carves the line while gliding) ----
-    if (input.rmb) this.carve += input.mouseDX * 0.0011;
-    this.carve -= this.carve * DAMP(input.rmb ? 1.1 : 6.0, dt);
+    if (input.gliding) this.carve += input.mouseDX * 0.0011;
+    this.carve -= this.carve * DAMP(input.gliding ? 1.1 : 6.0, dt);
     if (this.carve > 0.55) this.carve = 0.55;
     if (this.carve < -0.55) this.carve = -0.55;
     const speedFade = 1 / (1 + Math.abs(this.vz) * 0.045);
-    const steerTarget = (input.steer * params.carSteerMax + this.carve) * speedFade;
+    // gliding softens keyboard lock into a wide, committed arc
+    const kbScale = 1 - this.driftAmount * 0.55;
+    const steerTarget = (input.steer * params.carSteerMax * kbScale + this.carve) * speedFade;
     this.steerAngle += (steerTarget - this.steerAngle) * DAMP(8, dt);
 
     // ---- glide state eases in/out ----
-    const glideTarget = input.rmb && Math.abs(this.vz) > 6 ? 1 : 0;
+    const glideTarget = input.gliding && Math.abs(this.vz) > 6 ? 1 : 0;
     this.driftAmount += (glideTarget - this.driftAmount) * DAMP(glideTarget ? 3.2 : 2.2, dt);
 
     // ---- longitudinal ----
@@ -197,7 +203,7 @@ export class Car {
     }
     az -= this.vz * 0.045 + Math.sign(this.vz) * 0.35;
     // drift scrub: sliding sideways bleeds speed (weighty, not floaty)
-    az -= Math.abs(this.vx) * 0.11 * this.driftAmount;
+    az -= Math.abs(this.vx) * 0.15 * this.driftAmount;
     this.vz += az * dt;
     if (Math.abs(this.vz) < 0.15 && input.throttle === 0 && input.brake === 0) this.vz = 0;
 
@@ -209,8 +215,13 @@ export class Car {
     this.yaw += this.yawRate * dt;
 
     // ---- lateral slip ----
-    this.vx += -this.yawRate * this.vz * dt * (0.25 + this.driftAmount * 0.75);
-    const grip = params.carGrip + (params.carGlideGrip - params.carGrip) * this.driftAmount;
+    // slip source fades as the angle builds (the rear can only step out so far)
+    const slipNow = this.speed > 2 ? Math.atan2(Math.abs(this.vx), Math.abs(this.vz) + 0.5) : 0;
+    const sourceFade = Math.max(0, 1 - slipNow / 0.82);
+    this.vx += -this.yawRate * this.vz * dt * (0.25 + this.driftAmount * 0.75) * sourceFade;
+    // tyres saturate: past ~26° of slip the grip climbs steeply back
+    const satBoost = 1 + Math.max(0, slipNow - 0.45) * 7.0;
+    const grip = (params.carGrip + (params.carGlideGrip - params.carGrip) * this.driftAmount) * satBoost;
     const vxDecay = this.vx * DAMP(grip, dt);
     this.vx -= vxDecay;
     this.lateralG = (vxDecay / dt || 0) / 9.81;
@@ -219,10 +230,39 @@ export class Car {
 
     // ---- integrate world position ----
     const cy = Math.cos(this.yaw), sy = Math.sin(this.yaw);
-    const wvx = this.vx * cy + this.vz * sy;
-    const wvz = -this.vx * sy + this.vz * cy;
+    let wvx = this.vx * cy + this.vz * sy;
+    let wvz = -this.vx * sy + this.vz * cy;
     this.position.x += wvx * dt;
     this.position.z += wvz * dt;
+
+    // ---- curb containment: the street is fenced by real curbs ----
+    this.curbBump = 0;
+    sampleRoadSpace(this.position.x, this.position.z, _crs);
+    if (_crs.d > -CURB_MARGIN) {
+      const e = 0.06;
+      sampleRoadSpace(this.position.x + e, this.position.z, _crs2); const dx1 = _crs2.d;
+      sampleRoadSpace(this.position.x - e, this.position.z, _crs2); const dx0 = _crs2.d;
+      sampleRoadSpace(this.position.x, this.position.z + e, _crs2); const dz1 = _crs2.d;
+      sampleRoadSpace(this.position.x, this.position.z - e, _crs2); const dz0 = _crs2.d;
+      let gx = (dx1 - dx0) / (2 * e), gz = (dz1 - dz0) / (2 * e);
+      const gl = Math.hypot(gx, gz);
+      if (gl > 1e-4) {
+        gx /= gl; gz /= gl;
+        const pen = _crs.d + CURB_MARGIN;
+        this.position.x -= gx * pen;
+        this.position.z -= gz * pen;
+        const outward = wvx * gx + wvz * gz;
+        if (outward > 0) {
+          // kill outward velocity with a slightly springy rebound + scrub
+          wvx -= outward * 1.35 * gx;
+          wvz -= outward * 1.35 * gz;
+          this.vx = wvx * cy - wvz * sy;
+          this.vz = wvx * sy + wvz * cy;
+          this.vz *= 0.985;
+          this.curbBump = Math.min(1, outward * 0.18);
+        }
+      }
+    }
 
     this.speed = Math.hypot(this.vx, this.vz);
     this.slipYawOffset = this.speed > 2 ? Math.atan2(this.vx, Math.abs(this.vz)) : 0;

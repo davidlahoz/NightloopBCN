@@ -192,7 +192,13 @@ async function main() {
     if (dt > MAX_STEP) dt = MAX_STEP;
 
     input.beginFrame();
+    // scripted-capture hook: force a glide without real pointer events
+    if (NL.debugGlide) {
+      input.rmb = true;
+      input.mouseDX += NL.debugGlide;
+    }
     car.update(dt, input, groundHeight);
+    if (car.curbBump > 0) chase.shakeEnergy = Math.min(1, chase.shakeEnergy + car.curbBump);
     chase.update(dt, car, input, groundHeight);
 
     // tyre contact patches write into the surface state buffer
@@ -206,13 +212,18 @@ async function main() {
       const clear = Math.min(0.12 + sp * 0.05, 0.8);
       const ridge = Math.min(sp * 0.06, 0.9);
       const slip = car.driftAmount * 0.7 + (input.brake && sp > 6 ? 0.35 : 0) + Math.abs(car.slipYawOffset) * 1.4;
-      const rubber = sp > 4 ? Math.min(slip * 0.28, 0.5) * dt * 60 * 0.02 : 0;
+      const rubber = sp > 4 ? Math.min(slip * 0.6, 1.0) * 0.055 * (dt * 90) : 0;
       const len = Math.max(0.16, sp * dt * 0.85);
       const avail = params.roadWetness;
+      // Glide wake: sliding tyres clear a wider swath and throw bigger ridges
+      const width = 0.115 * (1 + car.driftAmount * 0.9);
+      const ridgeK = ridge * (1 + car.driftAmount * 1.3);
       for (let i = 0; i < 4; i++) {
+        const rear = i >= 2;
         surface.addSplat(
           car.wheelContactX[i], car.wheelContactZ[i], dx, dz,
-          len, 0.115, clear, ridge, 0.22, rubber, avail,
+          len, rear ? width : 0.115, clear, rear ? ridgeK : ridge, 0.22,
+          rear ? rubber : rubber * 0.3, avail,
         );
       }
     }

@@ -47,18 +47,18 @@ export class TyreFX {
     this._dir2 = [];
 
     for (let i = 0; i < 2; i++) {
-      const ps = new ParticleSystem(`nlSpray${i}`, 900, scene);
+      const ps = new ParticleSystem(`nlSpray${i}`, 1700, scene);
       ps.particleTexture = drop;
       const emitter = new Vector3(0, -10, 0);
       ps.emitter = emitter;
-      ps.minLifeTime = 0.28;
-      ps.maxLifeTime = 0.6;
-      ps.minSize = 0.05;
-      ps.maxSize = 0.17;
+      ps.minLifeTime = 0.3;
+      ps.maxLifeTime = 0.68;
+      ps.minSize = 0.12;
+      ps.maxSize = 0.38;
       ps.emitRate = 0;
       ps.gravity = new Vector3(0, -11, 0);
-      ps.color1 = new Color4(0.62, 0.68, 0.80, 0.42);
-      ps.color2 = new Color4(0.45, 0.50, 0.62, 0.30);
+      ps.color1 = new Color4(0.55, 0.61, 0.74, 0.46);
+      ps.color2 = new Color4(0.42, 0.47, 0.60, 0.32);
       ps.colorDead = new Color4(0.4, 0.45, 0.55, 0);
       ps.blendMode = ParticleSystem.BLENDMODE_STANDARD;
       ps.minEmitPower = 1;
@@ -70,7 +70,9 @@ export class TyreFX {
       ps.minEmitBox = new Vector3(-0.14, -0.05, -0.2);
       ps.maxEmitBox = new Vector3(0.14, 0.05, 0.2);
       ps.isBillboardBased = true;
-      ps.billboardMode = ParticleSystem.BILLBOARDMODE_STRETCHED;
+      // NOTE: BILLBOARDMODE_STRETCHED renders zero-area quads on this WebGPU
+      // path — ALL-axis billboards with soft round droplets read fine
+      ps.billboardMode = ParticleSystem.BILLBOARDMODE_ALL;
       ps.start();
       this.spray.push(ps);
       this._emitters.push(emitter);
@@ -125,8 +127,8 @@ export class TyreFX {
       e.x = car.wheelContactX[wi];
       e.y = car.wheelGroundY[wi] + 0.06;
       e.z = car.wheelContactZ[wi];
-      const wake = 0.5 + car.driftAmount * 1.6;
-      const rate = sp > 5 && wetness > 0.18 ? sp * 26 * wetness * wake : 0;
+      const wake = 0.5 + car.driftAmount * 1.8;
+      const rate = sp > 5 && wetness > 0.18 ? sp * 38 * wetness * wake : 0;
       ps.emitRate = rate;
       // droplets: thrown back along travel + up + outward kick in drift
       const outSign = i === 0 ? -1 : 1;
