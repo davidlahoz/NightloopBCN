@@ -29,6 +29,10 @@ uniform exposure : f32;
 uniform neonIntensity : f32;
 uniform windowLitFraction : f32;
 uniform time : f32;
+uniform sunShadowMatrix : mat4x4<f32>;
+uniform shadowDV : vec2f;
+
+var sunShadowMap : texture_2d<f32>;   // FILTER_NONE float map (textureLoad only)
 
 const GF_H : f32 = 4.5;   // ground/storefront band height in facade metres
 
@@ -196,7 +200,9 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
           let wid = vec2<i32>(i32(col) + iseed * 7, i32(row) + iseed * 13);
           let wr = nlHash2v(wid);
           let wr2 = nlHash2v(wid + vec2<i32>(517, 217));
-          let lit = step(wr.x, uniforms.windowLitFraction);
+          // per-building occupancy clustering: some buildings glow, some sleep
+          let bldOcc = 0.35 + 1.15 * nlHash2(vec2<i32>(iseed, 4441));
+          let lit = step(wr.x, uniforms.windowLitFraction * bldOcc);
           let gridFade = 1.0 - smoothstep(0.25, 0.70, aaU / cellW);
 
           // lit interior: warm/cool temperature, vignette, blinds
@@ -267,12 +273,13 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
           let paneL = 1.0 - smoothstep(0.03, 0.06 + aaU, pd);
           let dimF = mix(0.08, 1.0, litShop);
           // interior breakup: shelves/displays block parts of the glazing
-          let breakup = 0.45 + 0.55 * nlValueNoise(vec2f(u * 0.85 + seed * 31.0, v * 0.9));
-          let glow = scol * ((0.62 * dimF) * (0.35 + 0.65 * vigS) * vGrad * breakup);
-          let sheenS = pow(clamp(1.0 - abs(dot(viewDir, n)), 0.0, 1.0), 3.0);
-          let glassEmS = uniforms.ambientSky *
-                         (uniforms.ambientIntensity * (0.05 + 0.30 * sheenS)) * (1.0 - litShop);
-          shopAlb = mix(shopAlb, vec3f(0.015, 0.016, 0.020), glassM);
+          let breakup = 0.30 + 0.70 * nlValueNoise(vec2f(u * 0.85 + seed * 31.0, v * 0.9));
+          let glow = scol * ((0.50 * dimF) * (0.35 + 0.65 * vigS) * vGrad * breakup);
+          let sheenS = pow(clamp(1.0 - abs(dot(viewDir, n)), 0.0, 1.0), 2.5);
+          // unlit shops still read as glass: sky sheen + faint interior grey
+          let glassEmS = (uniforms.ambientSky * (uniforms.ambientIntensity * (0.07 + 0.20 * sheenS))
+                          + vec3f(0.010, 0.011, 0.013)) * (1.0 - litShop);
+          shopAlb = mix(shopAlb, vec3f(0.030, 0.032, 0.038), glassM);
           shopEm = (glow * (1.0 - paneL * 0.85) + glassEmS) * glassM;
         }
         // dark recessed frame at the glazing/pier boundary
@@ -281,7 +288,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
         shopAlb = mix(shopAlb, vec3f(0.045, 0.044, 0.042), frameLn * 0.9);
         // fascia sign band above the glazing
         let fasciaOn = litShop * (0.4 + 0.6 * sf2.y);
-        shopEm = shopEm + scol * (fasciaM * fasciaOn * (0.35 + 0.85 * uniforms.neonIntensity) *
+        shopEm = shopEm + scol * (fasciaM * fasciaOn * (0.16 + 0.42 * uniforms.neonIntensity) *
                  (0.60 + 0.40 * nlValueNoise(vec2f(u * 2.3 + seed * 53.0, 0.5))));
         shopAlb = mix(shopAlb, vec3f(0.050, 0.050, 0.055), fasciaM * (1.0 - litShop * 0.5) * 0.6);
         albedo = shopAlb;
@@ -300,10 +307,26 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     }
   }
 
-  // ---------- fake lighting: hemispheric ambient + weak directional sun ----
+  // ---------- lighting: hemispheric ambient + shadowed directional sun ----
   let hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
   let amb = mix(uniforms.ambientGround, uniforms.ambientSky, hemi) * uniforms.ambientIntensity;
-  let sunT = max(dot(n, -uniforms.sunDir), 0.0) * uniforms.sunIntensity * 0.35;
+  var sunT = max(dot(n, -uniforms.sunDir), 0.0) * uniforms.sunIntensity * 0.35;
+  if (sunT > 0.001) {
+    // 4-tap PCF against the car-follow shadow map (same encoding as the road)
+    let sp = uniforms.sunShadowMatrix * vec4f(world, 1.0);
+    let suv = vec2f(sp.x, sp.y) * 0.5 + vec2f(0.5);
+    if (suv.x > 0.002 && suv.x < 0.998 && suv.y > 0.002 && suv.y < 0.998) {
+      let viewZ = sp.z * (uniforms.shadowDV.y - uniforms.shadowDV.x) + uniforms.shadowDV.x;
+      let refM = (viewZ + uniforms.shadowDV.x) / (uniforms.shadowDV.x + uniforms.shadowDV.y);
+      let ip = vec2<i32>(suv * 4096.0);
+      var sh = 0.0;
+      sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip, 0).r + 0.0013);
+      sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip + vec2<i32>(2, 1), 0).r + 0.0013);
+      sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip + vec2<i32>(-1, 2), 0).r + 0.0013);
+      sh = sh + select(0.0, 1.0, refM <= textureLoad(sunShadowMap, ip + vec2<i32>(-2, -2), 0).r + 0.0013);
+      sunT = sunT * (sh * 0.25);
+    }
+  }
   var col = albedo * (amb + uniforms.sunColor * sunT) + emis;
 
   let fogF = nlFogFactor(eye, world, uniforms.fogDensity, uniforms.fogHeightFalloff);

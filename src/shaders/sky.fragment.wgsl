@@ -20,11 +20,18 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let y = dir.y;
   let toSun = -uniforms.sunDir;
 
-  // vertical gradient: haze band at horizon, horizon colour, zenith
+  // vertical gradient: haze band at horizon, horizon colour, zenith.
+  // the warm horizon lives around the sun's azimuth; opposite side stays cool
+  let sunAzim = normalize(vec2f(toSun.x, toSun.z) + vec2f(1e-5));
+  let dirAzim = normalize(vec2f(dir.x, dir.z) + vec2f(1e-5));
+  let azAlign = dot(sunAzim, dirAzim) * 0.5 + 0.5;      // 1 toward sun, 0 away
+  let warmT = pow(azAlign, 1.6);
+  let horizonC = mix(uniforms.horizonHaze * 0.8 + uniforms.zenithColor * 0.25,
+                     uniforms.horizonColor, warmT);
   let hz = clamp(y * 2.2, 0.0, 1.0);
-  var col = mix(uniforms.horizonColor, uniforms.zenithColor, pow(hz, 0.55));
-  let hazeBand = exp(-abs(y) * 16.0);
-  col = mix(col, uniforms.horizonHaze, hazeBand * 0.5);
+  var col = mix(horizonC, uniforms.zenithColor, pow(hz, 0.50));
+  let hazeBand = exp(-abs(y) * 14.0);
+  col = mix(col, uniforms.horizonHaze, hazeBand * 0.45);
 
   // sun disc + glow (visible when above horizon)
   let cosSun = dot(dir, toSun);
@@ -34,20 +41,24 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
            + pow(clamp(cosSun, 0.0, 1.0), 4000.0) * 24.0;
   col = col + uniforms.sunColor * glow * uniforms.sunIntensity * 0.35 * sunUp;
 
-  // clouds: two drifting fbm layers, lit warm toward the sun
-  if (uniforms.cloudCover > 0.003 && y > 0.02) {
+  // clouds: two drifting fbm layers, dark blue-grey wisps with warm sun edges
+  if (uniforms.cloudCover > 0.003 && y > 0.015) {
     // project onto a plane at height 1 for stable cloud shapes
-    let cp = dir.xz / max(y, 0.08);
+    let cp = dir.xz / max(y, 0.09);
     let drift = vec2f(uniforms.time * 0.006, uniforms.time * 0.0023);
-    var cd = nlFbm3(cp * 1.7 + drift);
-    cd = cd + 0.5 * nlFbm3(cp * 4.3 - drift * 1.7);
-    cd = cd / 1.5;
-    let cover = smoothstep(1.0 - uniforms.cloudCover, 1.02 - uniforms.cloudCover * 0.55, cd);
-    let horizonFade = smoothstep(0.02, 0.16, y);
-    let cloudLit = mix(uniforms.zenithColor * 0.75 + uniforms.horizonHaze * 0.35,
-                       uniforms.sunColor * (0.35 + 0.5 * sunUp),
-                       pow(clamp(cosSun, 0.0, 1.0), 3.0) * 0.8);
-    col = mix(col, cloudLit, cover * horizonFade * 0.85);
+    var cd = nlFbm3(cp * 0.55 + drift);
+    cd = cd + 0.45 * nlFbm3(cp * 1.9 - drift * 1.7);
+    cd = cd / 1.45;
+    let th = 0.72 - uniforms.cloudCover * 0.42;
+    let cover = smoothstep(th, th + 0.14, cd);
+    let horizonFade = smoothstep(0.015, 0.14, y) * (1.0 - smoothstep(0.5, 0.95, y) * 0.4);
+    let warmEdge = pow(clamp(cosSun, 0.0, 1.0), 2.0) * sunUp;
+    let cloudDark = uniforms.zenithColor * 0.55 + vec3f(0.02, 0.02, 0.03);
+    let cloudLit = mix(cloudDark, uniforms.sunColor * 0.55 + uniforms.horizonColor * 0.25, warmEdge * 0.75);
+    // thin edges glow slightly warmer than the dense core
+    let core = smoothstep(th + 0.10, th + 0.30, cd);
+    let cloudCol = mix(cloudLit * 1.15, cloudDark, core * 0.7);
+    col = mix(col, cloudCol, cover * horizonFade * 0.9);
   }
 
   // stars: stable hash points, only in dark skies, fade near horizon

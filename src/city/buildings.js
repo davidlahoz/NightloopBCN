@@ -23,7 +23,7 @@ import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
 import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
-import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { blockRects, intersections } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
@@ -120,6 +120,15 @@ export class Buildings {
     this._time = 0;
     this.material.setFloat('time', 0);
 
+    // canyon sun shadows: sample the car-follow shadow map like the road does
+    this._env = env;
+    if (env && env.shadow) {
+      this.material.setTexture('sunShadowMap', env.shadow.getShadowMap());
+      this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMaxZ);
+      this.material.setVector2('shadowDV', this._shadowDV);
+      this.material.setMatrix('sunShadowMatrix', env.shadow.getTransformMatrix());
+    }
+
     if (env) this.applyEnvironment(env);
   }
 
@@ -151,10 +160,13 @@ export class Buildings {
     }
   }
 
-  /** Per-frame. Only advances the flicker clock — zero allocations. */
+  /** Per-frame: flicker clock + follow-shadow matrix. Zero allocations. */
   update(dt, _camX, _camZ) {
     this._time += dt;
     this.material.setFloat('time', this._time);
+    if (this._env && this._env.shadow) {
+      this.material.setMatrix('sunShadowMatrix', this._env.shadow.getTransformMatrix());
+    }
   }
 
   /** Touch the pipeline once during loading. */

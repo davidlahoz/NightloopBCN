@@ -289,7 +289,9 @@ export class Skyline {
     this._cSun.copyFromFloats(p.sunColor[0] * sAmp, p.sunColor[1] * sAmp, p.sunColor[2] * sAmp);
 
     m.setVector3('sunDir', env.sunDir);
-    m.setFloat('fogDensity', p.fogDensity);
+    // slightly under-fog the skyline so silhouettes survive to close vistas;
+    // in fogbank states (high density) it still vanishes completely
+    m.setFloat('fogDensity', p.fogDensity * 0.55);
     m.setFloat('fogHeightFalloff', p.fogHeightFalloff);
     m.setFloat('windowLitFraction', p.windowLitFraction);
     m.setFloat('windowEmission', 0.45 + 0.85 * p.neonIntensity);

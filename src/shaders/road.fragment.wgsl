@@ -23,7 +23,7 @@ uniform reflStrength : f32;
 uniform markingWear : f32;
 uniform sunShadowMatrix : mat4x4<f32>;
 uniform shadowMapSize : f32;
-uniform shadowDV : vec2f;          // (minZ, minZ + maxZ) — Babylon depth metric constants
+uniform shadowDV : vec2f;          // (shadowMinZ, shadowMaxZ) of the sun
 uniform lightCount : f32;
 uniform stateCenter : vec4f;       // xy = state buffer world center, z = half-extent, w = enabled
 uniform headlight0 : vec4f;        // xyz pos, w intensity (0 = off)
@@ -147,9 +147,12 @@ fn shadowTap(ip : vec2<i32>, refM : f32) -> f32 {
 
 fn sampleSunShadow(wp : vec3f) -> f32 {
   let sp = uniforms.sunShadowMatrix * vec4f(wp, 1.0);
-  let uv = vec2f(sp.x, -sp.y) * 0.5 + vec2f(0.5);
+  let uv = vec2f(sp.x, sp.y) * 0.5 + vec2f(0.5);
   if (uv.x <= 0.002 || uv.x >= 0.998 || uv.y <= 0.002 || uv.y >= 0.998) { return 1.0; }
-  let refM = (sp.z + uniforms.shadowDV.x) / uniforms.shadowDV.y;
+  // stored metric is light-VIEW depth: (viewZ + minZ) / (minZ + maxZ);
+  // sp.z is normalized [0,1] ortho depth, so un-normalize first
+  let viewZ = sp.z * (uniforms.shadowDV.y - uniforms.shadowDV.x) + uniforms.shadowDV.x;
+  let refM = (viewZ + uniforms.shadowDV.x) / (uniforms.shadowDV.x + uniforms.shadowDV.y);
   let sz = uniforms.shadowMapSize;
   let ip = vec2<i32>(uv * sz);
   var s = 0.0;
@@ -240,7 +243,8 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   baseCol = baseCol * (0.72 + tone * 0.5);
 
   // ------------------------------------------------ albedo composition
-  var albedo = baseCol * vec3f(0.94, 0.97, 1.0) * 0.95;
+  // desaturate the scan toward neutral asphalt grey, slight cool bias
+  var albedo = mix(baseCol, vec3f(nlLuma(baseCol)), 0.55) * vec3f(0.88, 0.94, 1.06) * 0.92;
   albedo = albedo * (1.0 - wear * 0.28);                       // burnished tracks darker
   albedo = mix(albedo, albedo * vec3f(0.52, 0.5, 0.5), clamp(stain, 0.0, 1.0) * 0.75);
   albedo = mix(albedo, albedo * 0.62 + vec3f(0.012), clamp(patchM, 0.0, 1.0) * 0.8);
@@ -285,7 +289,11 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let dampHalo = smoothstep(-0.012, 0.0015, waterLevel - potential) - waterMask; // damp rim around puddles
 
   var wet = clamp(uniforms.wetness + stateS.b, 0.0, 1.0);
-  wet = clamp(wet + dampHalo * 0.55 + wear * wet * 0.25, 0.0, 1.0);
+  // patchy drying: crown sheds water first, gutters hold it, tracks keep film
+  let dryVar = nlFbm3(wp.xz * 0.16 + vec2f(7.3, 2.9));
+  wet = wet * (0.62 + 0.55 * dryVar);
+  wet = clamp(wet - crossRel * 3.2 * (1.0 - wet * 0.5), 0.0, 1.0);
+  wet = clamp(wet + gutter * 0.30 + dampHalo * 0.55 + wear * wet * 0.35, 0.0, 1.0);
   let wetF = smoothstep(0.05, 0.75, wet);
 
   // wet darkening (porosity absorption), stronger in gutter grime
@@ -418,11 +426,11 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     if (d2 > radius * radius) { continue; }
     let ld = sqrt(d2);
     let Ln = toL / ld;
-    let att = pow(1.0 - ld / radius, 1.6) / (1.0 + d2 * 0.02);
+    let att = pow(1.0 - ld / radius, 2.2) / (1.0 + d2 * 0.035);
     let NdLl = clamp(dot(N, Ln), 0.0, 1.0);
     let lcol = lc.rgb * lc.w;
     // diffuse pool
-    col = col + albedo * lcol * NdLl * att * 30.0;
+    col = col + albedo * lcol * NdLl * att * 26.0;
     // wet streak specular (anisotropic GGX stretched along view azimuth)
     if (wetF > 0.02 || rough < 0.5) {
       let H = normalize(Ln + V);
@@ -467,14 +475,15 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   if (uniforms.glintIntensity > 0.001 && detailFade > 0.05) {
     let cell = floor(wp.xz * 140.0);
     let gr = nlHash2v(vec2<i32>(cell));
-    if (gr.x > 0.86) {
+    if (gr.x > 0.93) {
       // micro-facet normal from hash, tight cone around N
       let mfn = normalize(N + vec3f(gr.x - 0.5, 0.0, gr.y - 0.5) * 0.9);
       let H = normalize(bestGlintDir + V);
       let alignment = clamp(dot(mfn, H), 0.0, 1.0);
       let grazing = pow(1.0 - NdV, 2.0);
+      let nearFade = smoothstep(3.0, 9.0, dist);
       let sparkle = pow(alignment, 900.0) * grazing * (0.35 + wetF * 1.2) * (1.0 - waterMask);
-      col = col + bestGlintCol * sparkle * uniforms.glintIntensity * 30.0 * detailFade;
+      col = col + bestGlintCol * sparkle * uniforms.glintIntensity * 16.0 * detailFade * nearFade;
     }
   }
 

@@ -542,7 +542,7 @@ export class Curbs {
     this.scene = scene;
 
     this._matCurb = makePbrSet(scene, 'nlCurbConcrete', '/assets/textures/concrete/', 1 / 0.75, 0);
-    this._matWalk = makePbrSet(scene, 'nlSidewalkPaving', '/assets/textures/paving/', 1 / 1.5, 0);
+    this._matWalk = makePbrSet(scene, 'nlSidewalkPaving', '/assets/textures/paving/', 1 / 2.7, 0);
     // Moderate metallic: there is no IBL env texture, full metals would read black.
     this._matManhole = makePbrSet(scene, 'nlManholeSteel', '/assets/textures/metal/', 1 / 0.8, 0.45);
     this._matDrain = makePbrSet(scene, 'nlDrainIron', '/assets/textures/metal/', 1 / 0.4, 0.55);

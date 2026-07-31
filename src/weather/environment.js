@@ -30,9 +30,9 @@ export function makeWeatherParams() {
     sunIntensity: 3.2,
     sunColor: [1.0, 0.62, 0.36],
     // sky dome
-    zenithColor: [0.12, 0.19, 0.38],
-    horizonColor: [0.86, 0.52, 0.30],
-    horizonHaze: [0.48, 0.40, 0.44],
+    zenithColor: [0.060, 0.100, 0.235],
+    horizonColor: [0.82, 0.46, 0.25],
+    horizonHaze: [0.33, 0.28, 0.345],
     starAmount: 0.0,
     cloudCover: 0.35,
     // ambient

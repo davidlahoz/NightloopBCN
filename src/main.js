@@ -51,6 +51,20 @@ async function main() {
   const roadMat = new RoadMaterial(scene, env);
   const roadChunks = new RoadChunks(scene, roadMat.material);
 
+  // city floor: dark ground under everything so no void is ever visible
+  {
+    const floor = BABYLON.MeshBuilder.CreateGround('cityFloor', { width: 2000, height: 2000 }, scene);
+    floor.position.y = -0.35;
+    const fm = new BABYLON.PBRMaterial('cityFloorMat', scene);
+    fm.albedoColor = new BABYLON.Color3(0.020, 0.021, 0.024);
+    fm.metallic = 0;
+    fm.roughness = 0.95;
+    floor.material = fm;
+    floor.isPickable = false;
+    floor.freezeWorldMatrix();
+    floor.metadata = { nlNoShadow: true };
+  }
+
   // city modules (buildings, curbs, skyline, props) integrate here as they land
   /** @type {Array<{applyEnvironment:Function,update:Function}>} */
   const cityModules = [];

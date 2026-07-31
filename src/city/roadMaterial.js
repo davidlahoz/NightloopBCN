@@ -92,8 +92,8 @@ export class RoadMaterial {
     // ---- static-ish uniforms ----
     mat.setFloat('time', 0);
     mat.setFloat('shadowMapSize', 4096);
-    // Babylon FILTER_NONE depth metric constants: (minZ, minZ + maxZ)
-    this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMinZ + env.sun.shadowMaxZ);
+    // sun ortho near/far — used to reconstruct the light-view depth metric
+    this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMaxZ);
     mat.setVector2('shadowDV', this._shadowDV);
     this._hl0 = new Vector4(0, 0, 0, 0);
     this._hl1 = new Vector4(0, 0, 0, 0);
