@@ -244,6 +244,7 @@ async function main() {
     scene.render();
   }
 
+
   // ---- main loop ----
   let lastT = performance.now();
   const MAX_STEP = 1 / 30;
@@ -351,6 +352,14 @@ async function main() {
     if (!NL.ready && NL.frame === 8) {
       loadingScreen.hide();
       NL.ready = true;
+    }
+    // hero car GLB: importing the glTF during the synchronous boot renders
+    // corrupts city PBR pipelines on WebGPU (black or blown shading). It is
+    // only safe once the live render loop has presented real frames — so the
+    // placeholder swaps out a few frames in, behind the loading-screen fade.
+    if (NL.frame === 14 && !NL.carSwapStarted) {
+      NL.carSwapStarted = true;
+      car.swapToModel(scene);
     }
   });
 }

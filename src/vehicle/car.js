@@ -17,9 +17,10 @@ import { sampleRoadSpace, CURB_W, SIDEWALK_W } from '../city/cityPlan.js';
 import { buildCarBody } from './carBody.js';
 import { buildWheel } from './carWheels.js';
 import { CarMaterials } from './carMaterials.js';
+import { loadCarModel } from './carModel.js';
 
-defineParam('carTopSpeed', 36, { label: 'top speed m/s', section: 'car', min: 10, max: 60, step: 1 });
-defineParam('carAccel', 9.5, { label: 'accel m/s²', section: 'car', min: 3, max: 20, step: 0.5 });
+defineParam('carTopSpeed', 55, { label: 'top speed m/s', section: 'car', min: 10, max: 70, step: 1 });
+defineParam('carAccel', 11, { label: 'accel m/s²', section: 'car', min: 3, max: 20, step: 0.5 });
 defineParam('carBrake', 14, { label: 'brake m/s²', section: 'car', min: 5, max: 25, step: 0.5 });
 defineParam('carGrip', 9.0, { label: 'grip', section: 'car', min: 2, max: 20, step: 0.5 });
 defineParam('carGlideGrip', 1.7, { label: 'glide grip', section: 'car', min: 0.3, max: 6, step: 0.1 });
@@ -63,6 +64,9 @@ export class Car {
     this._heave = 0; this._heaveV = 0;
     this._pitch = 0; this._pitchV = 0;
     this._roll = 0; this._rollV = 0;
+    // terrain attitude follows the wheels FAST (curbs/median are steps; the
+    // slow spring is only for acceleration lean, or the body clips the curb)
+    this._tPitch = 0; this._tRoll = 0;
     this._prevVz = 0;
     this._prevVx = 0;
 
@@ -75,7 +79,42 @@ export class Car {
     this.wheelSteer = new Float32Array(2); // FL, FR (Ackermann)
 
     this.materials = new CarMaterials(scene);
+    this._tailMat = null;
+    this.wheelRadius = WHEEL_R;
     this._build(scene);
+  }
+
+  /**
+   * Swap the procedural placeholder for the vendored muscle-car GLB.
+   * MUST be called only after the city's material pipelines have rendered
+   * at least once — importing the glTF before/while they first compile
+   * corrupts their shading on WebGPU (textured PBR renders black at
+   * distance). main.js calls this after the warm-up renders.
+   */
+  async swapToModel(scene) {
+    const model = await loadCarModel(scene);
+    if (!model) return;
+    const ordered = [
+      model.wheels.find((w) => w.front && w.left),
+      model.wheels.find((w) => w.front && !w.left),
+      model.wheels.find((w) => !w.front && w.left),
+      model.wheels.find((w) => !w.front && !w.left),
+    ];
+    if (model.wheels.length !== 4 || ordered.some((w) => !w)) {
+      console.warn('[NIGHTLOOP] car model wheel layout unexpected, keeping procedural car');
+      model.visual.dispose(false, false);
+      return;
+    }
+    // retire the placeholder
+    for (const key of ['body', 'glass', 'trim', 'liners', 'lightsFront', 'lightsRear', 'mirrors']) {
+      this.bodyMeshes[key].dispose(false, false);
+    }
+    for (const w of this.wheels) w.pivot.dispose(false, false);
+
+    model.visual.parent = this.bodyNode;
+    this._mw = ordered;                 // model wheels (local-space pivots)
+    this.wheelRadius = ordered[0].radius;
+    this._tailMat = model.tailMat;
   }
 
   _build(scene) {
@@ -171,7 +210,10 @@ export class Car {
       w.brake.material = this.materials.brake;
       w.tire.isPickable = w.rim.isPickable = w.brake.isPickable = false;
       w.root.dispose ? null : null;
-      this.wheels.push({ pivot, spin });
+      this.wheels.push({
+        pivot, spin,
+        baseLocalY: WHEEL_R, invScale: 1, spinSign: left ? 1 : -1,
+      });
     }
   }
 
@@ -357,14 +399,20 @@ export class Car {
     const gAvg = gSum * 0.25;
     this.position.y = gAvg;
 
-    // ---- sprung body: heave/pitch/roll springs ----
+    // ---- sprung body: terrain attitude fast, acceleration lean springy ----
     const frontAvg = (this.wheelGroundY[0] + this.wheelGroundY[1]) * 0.5;
     const rearAvg = (this.wheelGroundY[2] + this.wheelGroundY[3]) * 0.5;
     const leftAvg = (this.wheelGroundY[0] + this.wheelGroundY[2]) * 0.5;
     const rightAvg = (this.wheelGroundY[1] + this.wheelGroundY[3]) * 0.5;
-    // terrain-driven targets + acceleration lean
-    const pitchT = Math.atan2(rearAvg - frontAvg, WHEELBASE) + this.localAccelZ * 0.006;
-    const rollT = Math.atan2(rightAvg - leftAvg, TRACK) * -1 + (this.lateralG * 0.030 + this.vx * 0.006);
+    // terrain component tracks steps (curbs, median) almost instantly so the
+    // body climbs them instead of clipping through the edge
+    const terrainPitch = Math.atan2(rearAvg - frontAvg, WHEELBASE);
+    const terrainRoll = -Math.atan2(rightAvg - leftAvg, TRACK);
+    this._tPitch += (terrainPitch - this._tPitch) * DAMP(16, dt);
+    this._tRoll += (terrainRoll - this._tRoll) * DAMP(16, dt);
+    // lean component keeps the soft cinematic weight transfer
+    const pitchT = this.localAccelZ * 0.006;
+    const rollT = this.lateralG * 0.030 + this.vx * 0.006;
     const heaveT = 0;
     const K = 55, C = 9.5;
     this._heaveV += ((heaveT - this._heave) * K - this._heaveV * C) * dt;
@@ -379,20 +427,43 @@ export class Car {
     Quaternion.RotationYawPitchRollToRef(this.yaw, 0, 0, this._q);
     this.root.rotationQuaternion.copyFrom(this._q);
     this.bodyNode.position.y = this._heave;
-    Quaternion.RotationYawPitchRollToRef(0, this._pitch, this._roll, this._bq);
+    // clamp attitude: kerb hits + hard braking can spike the springs; a real
+    // car never visibly exceeds a few degrees of body tilt
+    let pTot = this._pitch + this._tPitch;
+    let rTot = this._roll + this._tRoll;
+    if (pTot > 0.12) pTot = 0.12; else if (pTot < -0.12) pTot = -0.12;
+    if (rTot > 0.12) rTot = 0.12; else if (rTot < -0.12) rTot = -0.12;
+    Quaternion.RotationYawPitchRollToRef(0, pTot, rTot, this._bq);
     this.bodyNode.rotationQuaternion.copyFrom(this._bq);
 
     // ---- wheels: plant on ground, spin, steer ----
-    const spinRate = this.vz / WHEEL_R;
+    const spinRate = this.vz / this.wheelRadius;
     this.materials.setBrake(this.braking);
-    for (let i = 0; i < 4; i++) {
-      this.wheelSpin[i] += spinRate * dt;
-      const w = this.wheels[i];
-      // wheel centre follows its own contact height relative to the root
-      w.pivot.position.y = (this.wheelGroundY[i] - gAvg) + WHEEL_R;
-      if (i < 2) w.pivot.rotation.y = this.wheelSteer[i];
-      const left = i % 2 === 0;
-      w.spin.rotation.x = left ? this.wheelSpin[i] : -this.wheelSpin[i];
+    if (this._tailMat) this._tailMat.emissiveIntensity = this.braking ? 3.4 : 1.2;
+    if (this._mw) {
+      // GLB wheels: pivots live inside the glTF's own (mirrored) space, so
+      // steer/spin are axis-angle around the pre-mapped local axes
+      for (let i = 0; i < 4; i++) {
+        this.wheelSpin[i] += spinRate * dt;
+        const w = this._mw[i];
+        const d = (this.wheelGroundY[i] - gAvg) * w.invWPerL;
+        w.pivot.position.set(
+          w.centerP.x + w.upL.x * d,
+          w.centerP.y + w.upL.y * d,
+          w.centerP.z + w.upL.z * d,
+        );
+        if (i < 2) Quaternion.RotationAxisToRef(w.upL, this.wheelSteer[i], w.pivot.rotationQuaternion);
+        Quaternion.RotationAxisToRef(w.axleL, this.wheelSpin[i], w.spin.rotationQuaternion);
+      }
+    } else {
+      for (let i = 0; i < 4; i++) {
+        this.wheelSpin[i] += spinRate * dt;
+        const w = this.wheels[i];
+        // wheel centre follows its own contact height relative to the root
+        w.pivot.position.y = w.baseLocalY + (this.wheelGroundY[i] - gAvg) * w.invScale;
+        if (i < 2) w.pivot.rotation.y = this.wheelSteer[i];
+        w.spin.rotation.x = w.spinSign * this.wheelSpin[i];
+      }
     }
   }
 }

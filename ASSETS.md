@@ -18,6 +18,7 @@ resolution is ever needed.
 | Metal 063 (aged dark oxidised steel) | `assets/textures/metal/{color,normal,roughness,ao}.jpg` | https://ambientcg.com/a/Metal063 (download `https://ambientcg.com/get?file=Metal063_2K-JPG.zip`) | Metal063 | CC0 1.0 |
 | Modern Evening Street 2k HDRI (blue-hour city street, by Grzegorz Wronkowski) | `assets/env/urban.hdr` | https://polyhaven.com/a/modern_evening_street (download `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/modern_evening_street_2k.hdr`) | modern_evening_street | CC0 1.0 |
 | Car Engine Loop 96kHz 4s (seamless recorded 4-cyl engine loop, normalized 44.1 kHz version), **by qubodup (Iwan Gabovitch)** — attribution required | `assets/audio/engine-loop.wav` | https://opengameart.org/content/car-engine-loop-96khz-4s (download `https://opengameart.org/sites/default/files/engine-loop.7z`) | engine-loop | CC-BY 3.0 |
+| Classic Muscle car (low-poly game-ready car, 5.6k tris), **by Lexyc16** — attribution required; tagged NoAI by the author | `assets/car/classic-muscle-car.glb` | https://sketchfab.com/3d-models/classic-muscle-car-641efc889e5f4543bae51d0922e6f4b3 (GLB converted download via Sketchfab) | 641efc88 | CC Attribution (CC-BY 4.0) |
 
 Notes:
 
@@ -30,5 +31,10 @@ Notes:
   if it is ever needed.
 - `assets/env/urban.hdr` verified against the Poly Haven API md5
   (`f16d9ee891148a1504cc6e2048516f90`), Radiance RGBE, 2048x1024.
-- No CC0 car model is vendored: nothing meeting the quality bar exists on
-  the approved hosts (see module notes / integration notes).
+- The muscle car's glTF materials are NOT used at runtime: the loader's
+  material instances corrupt other WebGPU pipelines in Babylon 8.56 (see
+  DECISIONS.md), so `src/vehicle/carModel.js` rebuilds equivalent plain
+  PBRMaterials (same colours read from the source file) and disposes the
+  imported ones. The vendored GLB itself is unmodified.
+- The procedural fallback car remains in the codebase and is used if the
+  GLB fails to load.

@@ -660,6 +660,8 @@ export class Props {
     this._si = si;
 
     // PBR props participate in scene fog (custom WGSL modules fog themselves).
+    // NOTE: main.js flips scene.fogEnabled off once after boot — see the
+    // "PBR recompile workaround" there before touching these lines.
     this.scene.fogMode = Scene.FOGMODE_EXP;
     this.scene.fogDensity = p.fogDensity;
     this.scene.fogColor.copyFromFloats(p.fogColor[0], p.fogColor[1], p.fogColor[2]);

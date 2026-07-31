@@ -10,7 +10,7 @@ import { defineParam, params } from '../core/params.js';
 
 defineParam('audioVolume', 0.4, { label: 'engine volume', section: 'audio', min: 0, max: 1, step: 0.02 });
 
-const GEARS = [0, 7, 14, 22, 30, 41];
+const GEARS = [0, 7, 14, 22, 30, 41, 56];
 // playbackRate span: the loop was recorded at working revs, so idle plays it
 // slowed right down and full song pushes it past native pitch
 const RATE_IDLE = 0.52;

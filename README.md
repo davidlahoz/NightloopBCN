@@ -70,6 +70,9 @@ in `shots/`.
 Engine sound: ["Car Engine Loop 96kHz 4s"](https://opengameart.org/content/car-engine-loop-96khz-4s)
 by qubodup (Iwan Gabovitch), CC-BY 3.0 — revved in real time via playback rate.
 
+Hero car: ["Classic Muscle car"](https://sketchfab.com/3d-models/classic-muscle-car-641efc889e5f4543bae51d0922e6f4b3)
+by Lexyc16, CC Attribution — normalised, re-materialed and wheel-rigged at load.
+
 ---
 
 *Built FULLY vibe-coded.*
