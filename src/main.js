@@ -122,6 +122,11 @@ async function main() {
   const rain = new Rain(scene, env);
   defineParam('weatherScrub', -0.01, { label: 'transition scrub', section: 'weather', min: -0.01, max: 1, step: 0.01 });
   onParam('weatherScrub', (v) => { weather.scrub = v < 0 ? NaN : v; });
+  // boot directly into a state for capture tooling: ?state=N
+  {
+    const s = parseInt(new URLSearchParams(location.search).get('state') ?? '', 10);
+    if (s >= 1 && s <= 5) weather.jumpTo(s);
+  }
 
   // ---- mirror + shadow wiring ----
   const refreshRenderLists = () => {

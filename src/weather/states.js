@@ -12,8 +12,8 @@ import { params, setParam } from '../core/params.js';
 /** @typedef {import('./environment.js').Environment} Env */
 
 const STATES = {
-  1: { // Golden — low warm sun raking the canyon, dry street, long shadows
-    sunElevation: 11, sunAzimuth: 238, sunIntensity: 3.8, sunColor: [1.0, 0.66, 0.34],
+  1: { // Golden — low warm sun raking straight down the E-W canyon, dry street
+    sunElevation: 12, sunAzimuth: 266, sunIntensity: 4.2, sunColor: [1.0, 0.66, 0.34],
     zenithColor: [0.15, 0.21, 0.36], horizonColor: [1.0, 0.60, 0.28], horizonHaze: [0.56, 0.44, 0.38],
     starAmount: 0, cloudCover: 0.20,
     ambientSky: [0.34, 0.36, 0.47], ambientGround: [0.30, 0.22, 0.15], ambientIntensity: 0.85,
@@ -109,6 +109,20 @@ export class WeatherSystem {
     this._wetTarget = s.wetnessTarget;
     this._puddleTarget = s.puddleLevel;
     this._push();
+  }
+
+  /** Jump instantly (boot / capture tooling). */
+  jumpTo(id) {
+    const s = STATES[id];
+    if (!s) return;
+    this.stateId = id;
+    this._from = null;
+    this._to = null;
+    this._t = 1;
+    this._applyInstant(s);
+    // snap the physical surface to the state too
+    params.roadWetness = s.wetnessTarget;
+    params.roadPuddles = s.puddleLevel;
   }
 
   /** Begin an eased physical transition to state id (1..5). */
