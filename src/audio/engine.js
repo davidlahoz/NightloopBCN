@@ -18,11 +18,16 @@ export class EngineAudio {
     /** @type {AudioContext|null} */
     this.ctx = null;
     this._rpm = 0.12;
+    this.muted = false;
+    this._masterSmooth = 0;
     const start = () => {
       if (!this.ctx) this._init();
       if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
     };
-    window.addEventListener('keydown', start, { passive: true });
+    window.addEventListener('keydown', (e) => {
+      start();
+      if (e.code === 'KeyM' && !e.repeat) this.muted = !this.muted;
+    }, { passive: true });
     window.addEventListener('mousedown', start, { passive: true });
   }
 
@@ -123,6 +128,9 @@ export class EngineAudio {
     this.noiseGain.gain.value = (throttle * 0.02 + sp * 0.0008) * (0.5 + rpm);
     this.bandpass.frequency.value = 700 + rpm * 900;
 
-    this.master.gain.value = params.audioVolume * 0.5;
+    // click-free mute: master gain eases toward its target
+    const masterTarget = this.muted ? 0 : params.audioVolume * 0.5;
+    this._masterSmooth += (masterTarget - this._masterSmooth) * (1 - Math.exp(-18 * dt));
+    this.master.gain.value = this._masterSmooth;
   }
 }

@@ -44,6 +44,7 @@ npm run dev        # http://localhost:5174  (Chrome desktop, WebGPU required)
 | mouse | orbit camera (recentres while driving) |
 | scroll | camera zoom |
 | `C` | chase ↔ bumper camera |
+| `M` | mute / unmute engine sound |
 | `1–5` | mood states: Golden · Blue hour · Downpour · Afterglow · Fogbank |
 | `` ` `` / `F1` | settings + performance overlay |
 
