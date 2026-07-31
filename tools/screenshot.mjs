@@ -65,15 +65,34 @@ if (process.env.EVAL) {
   }
 }
 
-// Optional scripted drive: name contains "drive" → hold W and steer for a bit, overlay open.
+// Optional scripted drive: hold W and steer for a bit (overlay open unless NOUI).
 if (process.env.DRIVE) {
-  await page.keyboard.press('Backquote'); // overlay
+  if (!process.env.NOUI) await page.keyboard.press('Backquote');
   await page.keyboard.down('w');
-  await page.waitForTimeout(2200);
-  await page.keyboard.down('a');
-  await page.waitForTimeout(900);
-  await page.keyboard.up('a');
-  await page.waitForTimeout(600);
+  if (process.env.DRIVE === 'straight') {
+    await page.waitForTimeout(2600);
+  } else {
+    await page.waitForTimeout(2200);
+    await page.keyboard.down('a');
+    await page.waitForTimeout(900);
+    await page.keyboard.up('a');
+    await page.waitForTimeout(600);
+  }
+  await page.keyboard.up('w');
+}
+
+// Optional post-drive eval (e.g. turn around to look at the tracks)
+if (process.env.POST_EVAL) {
+  try {
+    const r = await page.evaluate(async (code) => {
+      const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+      const fn = new AsyncFn('NL', 'BABYLON', `return (${code})`);
+      return JSON.stringify(await fn(window.__NIGHTLOOP__, window.BABYLON))?.slice(0, 2000);
+    }, process.env.POST_EVAL);
+    console.log('POST_EVAL →', r);
+  } catch (e) {
+    console.log('POST_EVAL error:', e.message);
+  }
 }
 await page.waitForTimeout(settleMs);
 

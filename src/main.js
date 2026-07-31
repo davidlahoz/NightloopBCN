@@ -14,10 +14,12 @@ import { PostChain } from './post/postChain.js';
 import { RoadMaterial } from './city/roadMaterial.js';
 import { RoadChunks } from './city/roadChunks.js';
 import { groundHeight } from './city/roadProfile.js';
+import { params } from './core/params.js';
 import { Props } from './city/props.js';
 import { Skyline } from './city/skyline.js';
 import { Buildings } from './city/buildings.js';
 import { Curbs } from './city/curbs.js';
+import { SurfaceState } from './surface/stateBuffer.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -82,6 +84,9 @@ async function main() {
     roadMat.setLights([props.getStreetlightHeads(), buildings.getNeonLights()]);
   };
   refreshRoadLights();
+
+  // surface state buffer (tyres write, road reads)
+  const surface = new SurfaceState(scene, roadMat);
 
   // ---- vehicle + camera ----
   const input = new Input(canvas);
@@ -148,6 +153,29 @@ async function main() {
     input.beginFrame();
     car.update(dt, input, groundHeight);
     chase.update(dt, car, input, groundHeight);
+
+    // tyre contact patches write into the surface state buffer
+    if (car.speed > 0.4) {
+      const cy = Math.cos(car.yaw), sy = Math.sin(car.yaw);
+      const wvx = car.vx * cy + car.vz * sy;
+      const wvz = -car.vx * sy + car.vz * cy;
+      const il = 1 / (Math.hypot(wvx, wvz) + 1e-5);
+      const dx = wvx * il, dz = wvz * il;
+      const sp = car.speed;
+      const clear = Math.min(0.12 + sp * 0.05, 0.8);
+      const ridge = Math.min(sp * 0.06, 0.9);
+      const slip = car.driftAmount * 0.7 + (input.brake && sp > 6 ? 0.35 : 0) + Math.abs(car.slipYawOffset) * 1.4;
+      const rubber = sp > 4 ? Math.min(slip * 0.28, 0.5) * dt * 60 * 0.02 : 0;
+      const len = Math.max(0.16, sp * dt * 0.85);
+      const avail = params.roadWetness;
+      for (let i = 0; i < 4; i++) {
+        surface.addSplat(
+          car.wheelContactX[i], car.wheelContactZ[i], dx, dz,
+          len, 0.115, clear, ridge, 0.22, rubber, avail,
+        );
+      }
+    }
+    surface.update(dt, car.position.x, car.position.z, env.params);
     input.endFrame();
 
     env.update(dt);

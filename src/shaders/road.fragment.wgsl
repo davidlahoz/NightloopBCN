@@ -249,13 +249,20 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   albedo = mix(albedo, albedo * vec3f(0.52, 0.5, 0.5), clamp(stain, 0.0, 1.0) * 0.75);
   albedo = mix(albedo, albedo * 0.62 + vec3f(0.012), clamp(patchM, 0.0, 1.0) * 0.8);
   albedo = mix(albedo, albedo * vec3f(0.78, 0.76, 0.72) + vec3f(0.02, 0.018, 0.014), gutter * 0.7); // gritty gutter
-  // rubber from state buffer
+  // rubber from state buffer (+ ridge gradient for reflection disturbance)
   var stateS = vec4f(0.0);
+  var ridgeGrad = vec2f(0.0);
   if (uniforms.stateCenter.w > 0.5) {
     let suv = (wp.xz - uniforms.stateCenter.xy) / uniforms.stateCenter.z * 0.5 + 0.5;
     stateS = textureSample(stateTex, stateTexSampler, suv);
     let inState = step(abs(suv.x - 0.5), 0.49) * step(abs(suv.y - 0.5), 0.49);
     stateS = stateS * inState;
+    let se = 1.5 / 2048.0;
+    let gR = textureSample(stateTex, stateTexSampler, suv + vec2f(se, 0.0)).g;
+    let gL = textureSample(stateTex, stateTexSampler, suv - vec2f(se, 0.0)).g;
+    let gU = textureSample(stateTex, stateTexSampler, suv + vec2f(0.0, se)).g;
+    let gD = textureSample(stateTex, stateTexSampler, suv - vec2f(0.0, se)).g;
+    ridgeGrad = vec2f(gR - gL, gU - gD) * inState;
   }
   albedo = mix(albedo, albedo * vec3f(0.32, 0.32, 0.34), clamp(stateS.a, 0.0, 1.0));
 
@@ -350,6 +357,8 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
       wn = wn + rDir * ring * 6.0;
       rippleAmp = rippleAmp + 0.02;
     }
+    // tyre-displaced ridges bend the water surface (and thus the reflection)
+    wn = wn + ridgeGrad * 90.0;
     let waterN = normalize(vec3f(wn.x * rippleAmp, 1.0, wn.y * rippleAmp));
     N = normalize(mix(N, waterN, waterMask));
   }
