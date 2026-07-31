@@ -58,8 +58,11 @@ Quality presets (low / medium / high) live in the overlay; medium is the
 default. `?q=high` / `?q=low` and `?state=N` work as URL parameters.
 
 See `DECISIONS.md` for engineering choices, `PERF.md` for frame-budget
-measurements, `ASSETS.md` for vendored CC0 assets. Milestone screenshots are
+measurements, `ASSETS.md` for vendored assets. Milestone screenshots are
 in `shots/`.
+
+Engine sound: ["Car Engine Loop 96kHz 4s"](https://opengameart.org/content/car-engine-loop-96khz-4s)
+by qubodup (Iwan Gabovitch), CC-BY 3.0 — revved in real time via playback rate.
 
 ---
 

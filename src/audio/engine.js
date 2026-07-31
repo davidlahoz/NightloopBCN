@@ -1,17 +1,20 @@
 /**
- * Procedural engine audio — no samples, pure WebAudio.
- *
- * Three oscillators (fundamental saw + octave saw + sub sine) through a
- * throttle-driven lowpass, plus band-passed noise for intake/road texture.
- * RPM follows speed through fake gear ratios (the classic rise-and-drop),
- * leaning richer under throttle and while gliding. Starts on the first user
- * gesture (browser autoplay policy); fully allocation-free per frame.
+ * Engine audio — a real recorded engine loop (CC-BY, see ASSETS.md) revved by
+ * playbackRate. RPM follows speed through fake gear ratios (rise-and-drop),
+ * spools with throttle, leans richer while gliding. A quiet sub-oscillator
+ * adds low-end body and band-passed noise adds road/intake texture.
+ * Starts on the first user gesture (autoplay policy); M toggles mute
+ * (click-free ramp); allocation-free per frame.
  */
 import { defineParam, params } from '../core/params.js';
 
 defineParam('audioVolume', 0.4, { label: 'engine volume', section: 'audio', min: 0, max: 1, step: 0.02 });
 
 const GEARS = [0, 7, 14, 22, 30, 41];
+// playbackRate span: the loop was recorded at working revs, so idle plays it
+// slowed right down and full song pushes it past native pitch
+const RATE_IDLE = 0.52;
+const RATE_MAX = 1.62;
 
 export class EngineAudio {
   constructor() {
@@ -20,6 +23,7 @@ export class EngineAudio {
     this._rpm = 0.12;
     this.muted = false;
     this._masterSmooth = 0;
+    this._rate = RATE_IDLE;
     const start = () => {
       if (!this.ctx) this._init();
       if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
@@ -43,32 +47,42 @@ export class EngineAudio {
     this.master.gain.value = 0;
     this.master.connect(ctx.destination);
 
-    // engine tone: fundamental + octave + sub, through a lowpass
+    // ---- recorded engine loop → lowpass → gain ----
     this.lowpass = ctx.createBiquadFilter();
     this.lowpass.type = 'lowpass';
-    this.lowpass.frequency.value = 300;
-    this.lowpass.Q.value = 0.8;
-
+    this.lowpass.frequency.value = 900;
+    this.lowpass.Q.value = 0.5;
     this.engineGain = ctx.createGain();
     this.engineGain.gain.value = 0;
     this.lowpass.connect(this.engineGain);
     this.engineGain.connect(this.master);
 
-    const mkOsc = (type, gain) => {
-      const osc = ctx.createOscillator();
-      osc.type = type;
-      const g = ctx.createGain();
-      g.gain.value = gain;
-      osc.connect(g);
-      g.connect(this.lowpass);
-      osc.start();
-      return osc;
-    };
-    this.oscFund = mkOsc('sawtooth', 0.5);
-    this.oscHarm = mkOsc('sawtooth', 0.22);
-    this.oscSub = mkOsc('sine', 0.65);
+    this.loopSource = null;
+    fetch('/assets/audio/engine-loop.wav')
+      .then((r) => r.arrayBuffer())
+      .then((ab) => ctx.decodeAudioData(ab))
+      .then((buffer) => {
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        src.playbackRate.value = this._rate;
+        src.connect(this.lowpass);
+        src.start();
+        this.loopSource = src;
+      })
+      .catch(() => { /* stay silent if the sample is missing */ });
 
-    // intake / road hiss: looped white noise through a bandpass
+    // ---- sub-oscillator: low-end weight under the recording ----
+    this.oscSub = ctx.createOscillator();
+    this.oscSub.type = 'sine';
+    this.oscSub.frequency.value = 45;
+    this.subGain = ctx.createGain();
+    this.subGain.gain.value = 0;
+    this.oscSub.connect(this.subGain);
+    this.subGain.connect(this.master);
+    this.oscSub.start();
+
+    // ---- road/intake hiss: looped noise through a bandpass ----
     const len = ctx.sampleRate * 1.5;
     const buf = ctx.createBuffer(1, len, ctx.sampleRate);
     const d = buf.getChannelData(0);
@@ -114,18 +128,19 @@ export class EngineAudio {
     // engine spools faster than it winds down
     const rate = target > this._rpm ? 3.6 : 2.0;
     this._rpm += (target - this._rpm) * (1 - Math.exp(-rate * dt));
-
     const rpm = this._rpm;
-    const f = 42 + rpm * 118;
-    this.oscFund.frequency.value = f;
-    this.oscHarm.frequency.value = f * 2.02;
-    this.oscSub.frequency.value = f * 0.5;
-    this.lowpass.frequency.value = 220 + rpm * 900 + throttle * 500;
 
-    // ---- loudness: working engine is louder than a coasting one ----
-    const load = 0.10 + throttle * 0.17 + rpm * 0.07 + car.driftAmount * 0.05;
-    this.engineGain.gain.value = load;
-    this.noiseGain.gain.value = (throttle * 0.02 + sp * 0.0008) * (0.5 + rpm);
+    // ---- rev the recording ----
+    this._rate = RATE_IDLE + (RATE_MAX - RATE_IDLE) * rpm;
+    if (this.loopSource) this.loopSource.playbackRate.value = this._rate;
+    // closed throttle muffles the engine; open throttle lets it breathe
+    this.lowpass.frequency.value = 500 + rpm * 2600 + throttle * 1800;
+
+    // ---- loudness: working engine louder than a coasting one ----
+    this.engineGain.gain.value = 0.30 + throttle * 0.34 + rpm * 0.12 + car.driftAmount * 0.10;
+    this.oscSub.frequency.value = 34 + rpm * 62;
+    this.subGain.gain.value = 0.10 + throttle * 0.08 + rpm * 0.05;
+    this.noiseGain.gain.value = (throttle * 0.015 + sp * 0.0007) * (0.5 + rpm);
     this.bandpass.frequency.value = 700 + rpm * 900;
 
     // click-free mute: master gain eases toward its target

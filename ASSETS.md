@@ -13,6 +13,7 @@ ambientCG `NormalGL`), `roughness.jpg` and `ao.jpg`, all 2048x2048 JPEG.
 | Paving Stones 112 (grey square sidewalk slabs, dirty joints) | `assets/textures/paving/{color,normal,roughness,ao}.jpg` | https://ambientcg.com/a/PavingStones112 (download `https://ambientcg.com/get?file=PavingStones112_2K-JPG.zip`) | PavingStones112 | CC0 1.0 |
 | Metal 063 (aged dark oxidised steel) | `assets/textures/metal/{color,normal,roughness,ao}.jpg` | https://ambientcg.com/a/Metal063 (download `https://ambientcg.com/get?file=Metal063_2K-JPG.zip`) | Metal063 | CC0 1.0 |
 | Modern Evening Street 2k HDRI (blue-hour city street, by Grzegorz Wronkowski) | `assets/env/urban.hdr` | https://polyhaven.com/a/modern_evening_street (download `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/modern_evening_street_2k.hdr`) | modern_evening_street | CC0 1.0 |
+| Car Engine Loop 96kHz 4s (seamless recorded 4-cyl engine loop, normalized 44.1 kHz version), **by qubodup (Iwan Gabovitch)** — attribution required | `assets/audio/engine-loop.wav` | https://opengameart.org/content/car-engine-loop-96khz-4s (download `https://opengameart.org/sites/default/files/engine-loop.7z`) | engine-loop | CC-BY 3.0 |
 
 Notes:
 
