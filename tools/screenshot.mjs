@@ -27,6 +27,7 @@ const browser = await chromium.launch({
     '--enable-gpu',
     '--no-sandbox',
     '--hide-scrollbars',
+    '--autoplay-policy=no-user-gesture-required',
   ],
 });
 

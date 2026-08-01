@@ -24,6 +24,8 @@ export class EngineAudio {
     this.muted = false;
     this._masterSmooth = 0;
     this._rate = RATE_IDLE;
+    this._screech = 0;       // smoothed tyre-scrub intensity 0..1
+    this._sqPhase = 0;       // squeal wobble phase
     const start = () => {
       if (!this.ctx) this._init();
       if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
@@ -100,6 +102,32 @@ export class EngineAudio {
     this.bandpass.connect(this.noiseGain);
     this.noiseGain.connect(this.master);
     noise.start();
+
+    // ---- tyre screech: same noise buffer through two parallel bandpasses —
+    // a narrow wobbling squeal plus a wider low scrub for rubber body ----
+    const screechSrc = ctx.createBufferSource();
+    screechSrc.buffer = buf;
+    screechSrc.loop = true;
+    screechSrc.playbackRate.value = 0.91;   // decorrelate from the hiss layer
+    this.squealBP = ctx.createBiquadFilter();
+    this.squealBP.type = 'bandpass';
+    this.squealBP.frequency.value = 1150;
+    this.squealBP.Q.value = 8.5;
+    this.scrubBP = ctx.createBiquadFilter();
+    this.scrubBP.type = 'bandpass';
+    this.scrubBP.frequency.value = 420;
+    this.scrubBP.Q.value = 1.4;
+    this.squealGain = ctx.createGain();
+    this.squealGain.gain.value = 0;
+    this.scrubGain = ctx.createGain();
+    this.scrubGain.gain.value = 0;
+    screechSrc.connect(this.squealBP);
+    screechSrc.connect(this.scrubBP);
+    this.squealBP.connect(this.squealGain);
+    this.scrubBP.connect(this.scrubGain);
+    this.squealGain.connect(this.master);
+    this.scrubGain.connect(this.master);
+    screechSrc.start();
   }
 
   /**
@@ -142,6 +170,24 @@ export class EngineAudio {
     this.subGain.gain.value = 0.10 + throttle * 0.08 + rpm * 0.05;
     this.noiseGain.gain.value = (throttle * 0.015 + sp * 0.0007) * (0.5 + rpm);
     this.bandpass.frequency.value = 700 + rpm * 900;
+
+    // ---- tyre screech: lateral scrub, drift and the locked handbrake all
+    // squeal; damp streets squeal noticeably less than dry ones ----
+    let scrub = 0;
+    if (sp > 3) {
+      scrub = Math.abs(car.vx) * 0.10
+        + car.driftAmount * 0.35
+        + (input.handbrake ? 0.45 : 0);
+      scrub = Math.min(1, scrub) * (1 - params.roadWetness * 0.45);
+    }
+    // fast attack, slower release — the squeal snaps in and trails off
+    const sRate = scrub > this._screech ? 14 : 5;
+    this._screech += (scrub - this._screech) * (1 - Math.exp(-sRate * dt));
+    const s = this._screech;
+    this._sqPhase += dt * (11 + s * 9);
+    this.squealBP.frequency.value = 1050 + s * 420 + Math.sin(this._sqPhase) * 90;
+    this.squealGain.gain.value = s * s * 0.42;
+    this.scrubGain.gain.value = s * 0.20;
 
     // click-free mute: master gain eases toward its target
     const masterTarget = this.muted ? 0 : params.audioVolume * 0.5;
