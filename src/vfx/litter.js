@@ -10,7 +10,9 @@ import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import '@babylonjs/core/Meshes/thinInstanceMesh.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
-import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowFace } from '../city/cityPlan.js';
+import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowFace, gridToWorld } from '../city/cityPlan.js';
+
+const _gw = { x: 0, z: 0 };
 import { groundHeight } from '../city/roadProfile.js';
 import { valueNoise, hash2 } from '../city/noise.js';
 
@@ -72,12 +74,11 @@ export class Litter {
 
       let x, z;
       if (this._axis[i] === 0) {
-        x = this._line[i] * PERIOD_X + this._side[i] * GUTTER_T;
-        z = this._s[i];
+        gridToWorld(this._line[i] * PERIOD_X + this._side[i] * GUTTER_T, this._s[i], _gw);
       } else {
-        x = this._s[i];
-        z = this._line[i] * PERIOD_Z + this._side[i] * (rowFace(this._line[i]) - 0.55);
+        gridToWorld(this._s[i], this._line[i] * PERIOD_Z + this._side[i] * (rowFace(this._line[i]) - 0.55), _gw);
       }
+      x = _gw.x; z = _gw.z;
       const dx = x - carX, dz = z - carZ;
       if (dx * dx + dz * dz > 4900) {
         this._recycle(i, carX, carZ, false);

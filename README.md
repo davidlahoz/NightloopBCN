@@ -6,11 +6,13 @@ A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet 
 
 - **Not a game.** No gameplay loop, no traffic laws, no objectives.
 - **Pure visuals.** Every frame is art-directed. Every frame is the product.
-- **Endless.** The city is a periodic procedural grid streamed around the car
+- **Endless.** The city is a periodic procedural plan streamed around the car
   — roads, curbs, buildings, signage, lights are generated on the fly and
-  discarded behind you. Every 4th east-west road is a six-lane motorway with
-  a barriered centre median. Drive any direction forever; revisited streets
-  are always identical (everything is seeded from cell coordinates).
+  discarded behind you. Streets sweep in gentle S-curves (the whole plan
+  lives in a smoothly warped coordinate frame), and every 4th east-west road
+  is a six-lane motorway with a barriered centre median. Drive any direction
+  forever; revisited streets are always identical (everything is seeded from
+  cell coordinates).
 
 ## The Stack
 

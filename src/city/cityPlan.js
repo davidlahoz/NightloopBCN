@@ -42,6 +42,67 @@ export const ZONE_CURB = 1;
 export const ZONE_SIDEWALK = 2;
 export const ZONE_BLOCK = 3;
 
+// ---------------------------------------------------------------------------
+// Street curvature — the whole plan is evaluated in a smoothly WARPED domain:
+// world → grid via p + warp(p). Every street becomes a gentle two-octave
+// serpentine (N-S streets meander in x with z, E-W rows meander in z with x)
+// while the analytic grid math stays exact. The road shader mirrors these
+// constants EXACTLY (road.fragment.wgsl nlWarp). Max slope ≈ 0.13, so
+// distances distort by ≤ ~13% locally — invisible, and physics/visuals agree
+// because both go through sampleRoadSpace.
+// ---------------------------------------------------------------------------
+export const WARP_MAX = 7.0;     // conservative |offset| bound (metres)
+const WX1_A = 4.5, WX1_K = 0.0146126, WX1_P = 0.9;    // λ ≈ 430 m
+const WX2_A = 2.0, WX2_K = 0.0299199, WX2_P = 4.1;    // λ ≈ 210 m
+const WZ1_A = 4.0, WZ1_K = 0.0161107, WZ1_P = 2.3;    // λ ≈ 390 m
+const WZ2_A = 2.0, WZ2_K = 0.0363201, WZ2_P = 0.7;    // λ ≈ 173 m
+
+/** Warp offset at world (x, z): grid = world + offset. Writes {x, z}. */
+export function warpOf(x, z, out) {
+  out.x = WX1_A * Math.sin(z * WX1_K + WX1_P) + WX2_A * Math.sin(z * WX2_K + WX2_P);
+  out.z = WZ1_A * Math.sin(x * WZ1_K + WZ1_P) + WZ2_A * Math.sin(x * WZ2_K + WZ2_P);
+  return out;
+}
+
+const _w = { x: 0, z: 0 };
+
+/**
+ * Inverse warp: find the world point whose grid image is (gx, gz).
+ * Two fixed-point iterations (|∂warp| < 0.14 → error < 1 cm). Writes out.
+ */
+export function gridToWorld(gx, gz, out) {
+  let px = gx, pz = gz;
+  for (let i = 0; i < 3; i++) {
+    warpOf(px, pz, _w);
+    px = gx - _w.x;
+    pz = gz - _w.z;
+  }
+  out.x = px;
+  out.z = pz;
+  return out;
+}
+
+const _t0 = { x: 0, z: 0 };
+const _t1 = { x: 0, z: 0 };
+
+/**
+ * World-space heading of a street at grid coordinate s along it, as a yaw
+ * DELTA from the street's nominal axis direction (rad, Babylon Y-yaw where
+ * heading(θ) = (sin θ, cos θ)). axis 0 = N-S street, axis 1 = E-W row.
+ */
+export function streetYawDelta(axis, line, s) {
+  if (axis === 0) {
+    const cx = line * PERIOD_X;
+    gridToWorld(cx, s - 2, _t0);
+    gridToWorld(cx, s + 2, _t1);
+    return Math.atan2(_t1.x - _t0.x, _t1.z - _t0.z);
+  }
+  const cz = line * PERIOD_Z;
+  gridToWorld(s - 2, cz, _t0);
+  gridToWorld(s + 2, cz, _t1);
+  return Math.atan2(_t1.x - _t0.x, _t1.z - _t0.z) - Math.PI / 2;
+}
+
 /** Row index of the E-W street nearest to z. */
 export function rowIndex(z) {
   return Math.round(z / PERIOD_Z);
@@ -74,10 +135,14 @@ export function rowSwEdge(j) {
  *  mwayB   — 1 when the E-W street is a motorway
  */
 export function sampleRoadSpace(x, z, out) {
-  const iA = colIndex(x);
-  const iB = rowIndex(z);
-  const tA = x - iA * PERIOD_X;
-  const tB = z - iB * PERIOD_Z;
+  // evaluate in the warped (grid) domain — this is what curves the streets
+  warpOf(x, z, _w);
+  const wx = x + _w.x;
+  const wz = z + _w.z;
+  const iA = colIndex(wx);
+  const iB = rowIndex(wz);
+  const tA = wx - iA * PERIOD_X;
+  const tB = wz - iB * PERIOD_Z;
   const faceA = CURB_FACE;
   const faceB = rowFace(iB);
   const dA = Math.abs(tA) - faceA;

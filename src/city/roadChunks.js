@@ -18,7 +18,7 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import {
   CURB_FACE, CORNER_R, sampleRoadSpace, segmentsInRegion, crossingsInRegion,
-  rowFace, rowIsMotorway,
+  rowFace, rowIsMotorway, warpOf, WARP_MAX,
 } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { quality } from '../core/quality.js';
@@ -36,6 +36,19 @@ const PIECE_LEN = 28;                  // street chunk length target
 const SKIRT = 0.06;                    // skirt drop (m)
 
 const _rs = { iA: 0, tA: 0, dA: 0, iB: 0, tB: 0, dB: 0, d: 0, wB: 0 };
+const _wp = { x: 0, z: 0 };
+
+/** Range of the street-curvature offset along a grid interval (world ≈ grid − warp). */
+function warpRange(axis, s0, s1) {
+  let mn = Infinity, mx = -Infinity;
+  const step = Math.max(4, (s1 - s0) / 8);
+  for (let s = s0; s <= s1 + 0.001; s += step) {
+    const v = axis === 0 ? warpOf(0, s, _wp).x : warpOf(s, 0, _wp).z;
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  return { mn, mx };
+}
 
 export class RoadChunks {
   /**
@@ -208,16 +221,21 @@ class Chunk {
     this._bs = null; // incremental build state
 
     if (def.kind === 'street') {
+      // the street meanders (domain warp): widen the cross extent by the
+      // actual warp range over this piece, plus margin for the fillets
+      const wr = warpRange(def.axis, def.s0, def.s1);
       if (def.axis === 0) {
-        this.minX = def.center - def.face; this.maxX = def.center + def.face;
-        this.minZ = def.s0; this.maxZ = def.s1;
+        this.minX = def.center - wr.mx - def.face - 1.4;
+        this.maxX = def.center - wr.mn + def.face + 1.4;
+        this.minZ = def.s0 - WARP_MAX; this.maxZ = def.s1 + WARP_MAX;
       } else {
-        this.minX = def.s0; this.maxX = def.s1;
-        this.minZ = def.center - def.face; this.maxZ = def.center + def.face;
+        this.minX = def.s0 - WARP_MAX; this.maxX = def.s1 + WARP_MAX;
+        this.minZ = def.center - wr.mx - def.face - 1.4;
+        this.maxZ = def.center - wr.mn + def.face + 1.4;
       }
     } else {
-      this.minX = def.x - def.halfX; this.maxX = def.x + def.halfX;
-      this.minZ = def.z - def.halfZ; this.maxZ = def.z + def.halfZ;
+      this.minX = def.x - def.halfX - WARP_MAX; this.maxX = def.x + def.halfX + WARP_MAX;
+      this.minZ = def.z - def.halfZ - WARP_MAX; this.maxZ = def.z + def.halfZ + WARP_MAX;
     }
     this.cx = (this.minX + this.maxX) * 0.5;
     this.cz = (this.minZ + this.maxZ) * 0.5;
@@ -248,7 +266,9 @@ class Chunk {
   beginBuild(step) {
     const nx = Math.max(2, Math.round((this.maxX - this.minX) / step) + 1);
     const nz = Math.max(2, Math.round((this.maxZ - this.minZ) / step) + 1);
-    const isInt = this.def.kind === 'intersection';
+    // every chunk is a masked grid now: the curved streets need their edges
+    // trimmed to the true (warped) d=0 contour, streets included
+    const isInt = true;
     this._bs = {
       step, nx, nz,
       h: new Float32Array((nx + 2) * (nz + 2)),
@@ -289,7 +309,7 @@ class Chunk {
   stepBuild(tStart) {
     const bs = this._bs;
     const { step, nx, nz } = bs;
-    const isInt = this.def.kind === 'intersection';
+    const isInt = true;   // all chunks masked (curved street edges)
 
     if (bs.phase === 0) {
       while (bs.row < nz + 2) {

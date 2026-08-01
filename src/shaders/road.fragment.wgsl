@@ -73,8 +73,16 @@ fn isMwayRow(j : f32) -> f32 {
   return select(0.0, 1.0, abs(m - 2.0) < 0.5);
 }
 
-fn roadSpace(p : vec2f) -> RS {
+// street curvature: world → grid domain warp (MUST match cityPlan.js warpOf)
+fn nlWarp(p : vec2f) -> vec2f {
+  let wx = 4.5 * sin(p.y * 0.0146126 + 0.9) + 2.0 * sin(p.y * 0.0299199 + 4.1);
+  let wz = 4.0 * sin(p.x * 0.0161107 + 2.3) + 2.0 * sin(p.x * 0.0363201 + 0.7);
+  return vec2f(p.x + wx, p.y + wz);
+}
+
+fn roadSpace(pw : vec2f) -> RS {
   var rs : RS;
+  let p = nlWarp(pw);
   let iA = round(p.x / NL_PX);
   let iB = round(p.y / NL_PZ);
   rs.tA = p.x - iA * NL_PX; rs.sA = p.y;

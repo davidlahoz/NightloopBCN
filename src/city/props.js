@@ -30,7 +30,7 @@ import { Scene } from '@babylonjs/core/scene.js';
 import {
   CURB_FACE, CORNER_R, PERIOD_X, PERIOD_Z,
   rowFace, rowSwEdge, rowIsMotorway, segmentsInRegion, crossingsInRegion,
-  blocksInRegion, cellSeed, SIDEWALK_EDGE,
+  blocksInRegion, cellSeed, SIDEWALK_EDGE, gridToWorld, streetYawDelta,
 } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { hash2, fbm3, valueNoise } from './noise.js';
@@ -149,6 +149,13 @@ function finalize(mesh, mat) {
 
 /** Push {x,z,yaw} onto a list. */
 function it(list, x, z, yaw) { list.push({ x, z, yaw }); }
+
+const _gw = { x: 0, z: 0 };
+/** Push a GRID-space point through the street-curvature warp. */
+function itG(list, gx, gz, yaw) {
+  gridToWorld(gx, gz, _gw);
+  list.push({ x: _gw.x, z: _gw.z, yaw });
+}
 
 /** Bake an {x,z,yaw} list into a fresh instance buffer on a master mesh. */
 function setInstances(mesh, list, lift) {
@@ -517,13 +524,12 @@ export class Props {
       for (let i = 0; i < nL; i++) {
         const s = a + step * (i + 0.5);
         const side = cellSeed(segId, segS0, 31 + i) > 0.5 ? 1 : -1;
-        let x, z, yaw;
+        const dyaw = streetYawDelta(seg.axis, seg.line, s);
         if (seg.axis === 0) {
-          x = seg.center + side * lateral; z = s; yaw = side > 0 ? Math.PI : 0;
+          itG(lamps, seg.center + side * lateral, s, (side > 0 ? Math.PI : 0) + dyaw);
         } else {
-          x = s; z = seg.center + side * lateral; yaw = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+          itG(lamps, s, seg.center + side * lateral, (side > 0 ? Math.PI / 2 : -Math.PI / 2) + dyaw);
         }
-        it(lamps, x, z, yaw);
       }
     }
     setInstances(this._lampMaster, lamps, -0.02);
@@ -551,21 +557,25 @@ export class Props {
       const ox = CURB_FACE + CORNER_R - SIG_INSET;
       const oz = rowFace(cr.j) + CORNER_R - SIG_INSET;
       const nsGreen = cellSeed(cr.i, cr.j, 43) < 0.5;
+      const dA = streetYawDelta(0, cr.i, cr.z);   // N-S street heading here
+      const dB = streetYawDelta(1, cr.j, cr.x);   // E-W row heading here
       const defs = [
-        { px: cr.x + ox, pz: cr.z + oz, yaw: Math.PI, green: nsGreen },        // faces -z
-        { px: cr.x - ox, pz: cr.z - oz, yaw: 0, green: nsGreen },              // faces +z
-        { px: cr.x - ox, pz: cr.z + oz, yaw: Math.PI / 2, green: !nsGreen },   // faces +x
-        { px: cr.x + ox, pz: cr.z - oz, yaw: -Math.PI / 2, green: !nsGreen },  // faces -x
+        { gx: cr.x + ox, gz: cr.z + oz, yaw: Math.PI + dA, green: nsGreen },        // faces -z
+        { gx: cr.x - ox, gz: cr.z - oz, yaw: 0 + dA, green: nsGreen },              // faces +z
+        { gx: cr.x - ox, gz: cr.z + oz, yaw: Math.PI / 2 + dB, green: !nsGreen },   // faces +x
+        { gx: cr.x + ox, gz: cr.z - oz, yaw: -Math.PI / 2 + dB, green: !nsGreen },  // faces -x
       ];
       for (const d of defs) {
-        it(poles, d.px, d.pz, d.yaw);
-        const gy = groundHeight(d.px, d.pz) - 0.02;
+        gridToWorld(d.gx, d.gz, _gw);
+        const px = _gw.x, pz = _gw.z;
+        it(poles, px, pz, d.yaw);
+        const gy = groundHeight(px, pz) - 0.02;
         const cyaw = Math.cos(d.yaw), syaw = Math.sin(d.yaw);
         for (let j = 0; j < 3; j++) {
           const ly = 3.25 - j * 0.3;
           const lit = d.green ? j === 2 : j === 0;
-          const x = d.px + 0.342 * syaw;
-          const z = d.pz + 0.342 * cyaw;
+          const x = px + 0.342 * syaw;
+          const z = pz + 0.342 * cyaw;
           (lit ? (d.green ? greenL : redL) : dark).push({ x, z, y: gy + ly, yaw: d.yaw });
         }
       }
@@ -598,7 +608,7 @@ export class Props {
           const count = 5;
           for (let i = 0; i < count; i++) {
             const th = (18 + ((72 - 18) * i) / (count - 1)) * DEG;
-            it(bollards,
+            itG(bollards,
               acx - sx * 4.6 * Math.cos(th),
               acz - sz * 4.6 * Math.sin(th),
               roll * 251 % (Math.PI * 2));
@@ -616,7 +626,8 @@ export class Props {
       const segS0 = Math.round(seg.s0);
       for (let s = a; s + 2.85 <= b; s += 2.98) {
         const jit = (cellSeed(seg.line, segS0, 53 + ((s / 2.98) | 0)) - 0.5) * 0.08;
-        it(jerseys, s + 1.42, seg.center + jit, Math.PI / 2 + jit * 0.5);
+        const dyaw = streetYawDelta(1, seg.line, s + 1.42);
+        itG(jerseys, s + 1.42, seg.center + jit, Math.PI / 2 + dyaw + jit * 0.5);
       }
     }
     setInstances(this._jerseys, jerseys, -0.02);
@@ -632,21 +643,21 @@ export class Props {
       if (side === 0) {        // south sidewalk
         x = bl.x0 + (bl.x1 - bl.x0) * f;
         z = bl.jz * PERIOD_Z + rowSwEdge(bl.jz) - 0.85;
-        yaw = (roll - 0.15) * 0.4;
+        yaw = streetYawDelta(1, bl.jz, x) + (roll - 0.15) * 0.4;
       } else if (side === 1) { // north sidewalk
         x = bl.x0 + (bl.x1 - bl.x0) * f;
         z = (bl.jz + 1) * PERIOD_Z - rowSwEdge(bl.jz + 1) + 0.85;
-        yaw = (roll - 0.15) * 0.4;
+        yaw = streetYawDelta(1, bl.jz + 1, x) + (roll - 0.15) * 0.4;
       } else if (side === 2) { // west sidewalk
         x = bl.ix * PERIOD_X + SIDEWALK_EDGE - 0.85;
         z = bl.z0 + (bl.z1 - bl.z0) * f;
-        yaw = Math.PI / 2 + (roll - 0.15) * 0.4;
+        yaw = Math.PI / 2 + streetYawDelta(0, bl.ix, z) + (roll - 0.15) * 0.4;
       } else {                 // east sidewalk
         x = (bl.ix + 1) * PERIOD_X - SIDEWALK_EDGE + 0.85;
         z = bl.z0 + (bl.z1 - bl.z0) * f;
-        yaw = Math.PI / 2 + (roll - 0.15) * 0.4;
+        yaw = Math.PI / 2 + streetYawDelta(0, bl.ix + 1, z) + (roll - 0.15) * 0.4;
       }
-      it(dumps, x, z, yaw);
+      itG(dumps, x, z, yaw);
     }
     setInstances(this._dumpsters, dumps, -0.025);
   }

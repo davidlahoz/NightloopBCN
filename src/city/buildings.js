@@ -22,7 +22,7 @@ import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
-import { PERIOD_X, PERIOD_Z, blocksInRegion, cellSeed } from './cityPlan.js';
+import { PERIOD_X, PERIOD_Z, blocksInRegion, cellSeed, gridToWorld, streetYawDelta } from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { buildBudget } from '../core/buildBudget.js';
 import facadeVertex from '../shaders/facade.vertex.wgsl?raw';
@@ -86,9 +86,36 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   const frontCands = [];
   const roofCands = [];
 
+  // -- rigid per-building transform (street curvature) ----------------------
+  // Buildings are laid out in GRID space; each is rotated to its street's
+  // local tangent around its front-centre pivot and shifted by the warp.
+  const _gw = { x: 0, z: 0 };
+  let xfOn = false, xfC = 1, xfS = 0, xfPX = 0, xfPZ = 0, xfOX = 0, xfOZ = 0;
+  function setXform(pivotGX, pivotGZ, yaw) {
+    gridToWorld(pivotGX, pivotGZ, _gw);
+    xfPX = pivotGX; xfPZ = pivotGZ;
+    xfOX = _gw.x - pivotGX; xfOZ = _gw.z - pivotGZ;
+    xfC = Math.cos(yaw); xfS = Math.sin(yaw);
+    xfOn = true;
+  }
+  function clearXform() { xfOn = false; }
+  const _xp = { x: 0, z: 0 };
+  function xfPoint(x, z) {
+    const dx = x - xfPX, dz = z - xfPZ;
+    _xp.x = xfPX + dx * xfC + dz * xfS + xfOX;
+    _xp.z = xfPZ - dx * xfS + dz * xfC + xfOZ;
+    return _xp;
+  }
+
   // -- low-level emitters ---------------------------------------------------
   // Babylon front faces satisfy cross(eU, eV) == -normal (see planeBuilder).
   function quad(px, py, pz, ux, uy, uz, vx, vy, vz, nx, ny, nz, ua, ub, va, vb, seed, flags, w, top) {
+    if (xfOn) {
+      const p = xfPoint(px, pz); px = p.x; pz = p.z;
+      let t = ux * xfC + uz * xfS; uz = -ux * xfS + uz * xfC; ux = t;
+      t = vx * xfC + vz * xfS; vz = -vx * xfS + vz * xfC; vx = t;
+      t = nx * xfC + nz * xfS; nz = -nx * xfS + nz * xfC; nx = t;
+    }
     const b = pos.length / 3;
     pos.push(
       px, py, pz,
@@ -178,10 +205,14 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       pxp = x; pzp = z;
     }
     const bc = pos.length / 3;
-    pos.push(cx, y0 + h, cz); nor.push(0, 1, 0); uvs.push(0, 5); col.push(seed, F_ROOF, r * 2, 1);
+    let fcx = cx, fcz = cz;
+    if (xfOn) { const p = xfPoint(cx, cz); fcx = p.x; fcz = p.z; }
+    pos.push(fcx, y0 + h, fcz); nor.push(0, 1, 0); uvs.push(0, 5); col.push(seed, F_ROOF, r * 2, 1);
     for (let k = 0; k < nS; k++) {
       const a = k * step;
-      pos.push(cx + Math.cos(a) * r, y0 + h, cz + Math.sin(a) * r);
+      let vx0 = cx + Math.cos(a) * r, vz0 = cz + Math.sin(a) * r;
+      if (xfOn) { const p = xfPoint(vx0, vz0); vx0 = p.x; vz0 = p.z; }
+      pos.push(vx0, y0 + h, vz0);
       nor.push(0, 1, 0); uvs.push(Math.cos(a) * r, 5 + Math.sin(a) * r);
       col.push(seed, F_ROOF, r * 2, 1);
     }
@@ -244,7 +275,14 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const cx = (bx0 + bx1) * 0.5, cz = (bz0 + bz1) * 0.5;
     const fx = o.nx !== 0 ? frontPlane : cx;
     const fz = o.nx !== 0 ? cz : frontPlane;
-    const vOff = groundHeight(fx, fz);
+    // street curvature: rotate this building to its street's local tangent
+    // and shift it by the warp — the frontage follows the curved sidewalk
+    const line = o.nx !== 0 ? Math.round(o.plane / PERIOD_X) : Math.round(o.plane / PERIOD_Z);
+    const dyaw = o.nx !== 0 ? streetYawDelta(0, line, fz) : streetYawDelta(1, line, fx);
+    setXform(fx, fz, dyaw);
+    const wf = xfPoint(fx, fz);
+    const wfx = wf.x, wfz = wf.z;
+    const vOff = groundHeight(wfx, wfz);
     const yBase = vOff - 0.9;
 
     let h = 13 + hBias * 24 + rng() * (7 + hBias * 12);
@@ -267,6 +305,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       }
     }
     roofClutter(tx0, tz0, tx1, tz1, topY, seed);
+    clearXform();
 
     // sign candidates: distance to the nearest block corner (≈ the crossing)
     let dInt = Infinity;
@@ -278,10 +317,11 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       nx: o.nx, nz: o.nz, plane: frontPlane,
       a0: o.nx !== 0 ? bz0 : bx0,
       w: o.nx !== 0 ? bz1 - bz0 : bx1 - bx0,
-      vOff, h1, fx, fz, dInt,
+      vOff, h1, fx: wfx, fz: wfz, dInt,
+      xfPX: fx, xfPZ: fz, xfYaw: dyaw,
     });
     if (h >= 20 && h <= 44) {
-      roofCands.push({ x0: tx0, z0: tz0, x1: tx1, z1: tz1, topY, nx: o.nx, nz: o.nz });
+      roofCands.push({ x0: tx0, z0: tz0, x1: tx1, z1: tz1, topY, nx: o.nx, nz: o.nz, xfPX: fx, xfPZ: fz, xfYaw: dyaw });
     }
     return setback + depth + 0.15;
   }
@@ -309,7 +349,9 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       const style = Math.min(5, (rng() * 6) | 0);
       let h = 24 + hBias * 26 + rng() * 8;
       if (h > 60) h = 60;
-      const vOff = groundHeight(tx + tw / 2, tz + td / 2);
+      setXform(tx + tw / 2, tz + td / 2, 0);   // interior towers: warp shift only
+      const wc = xfPoint(tx + tw / 2, tz + td / 2);
+      const vOff = groundHeight(wc.x, wc.z);
       let h1 = h;
       const hasUpper = rng() < 0.5;
       if (hasUpper) h1 = h * (0.55 + rng() * 0.15);
@@ -321,6 +363,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       } else {
         roofClutter(tx, tz, tx + tw, tz + td, vOff + h1, seed);
       }
+      clearXform();
     }
   }
 
@@ -366,6 +409,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
 
   // -- neon signs on facades near the crossings -----------------------------
   function pushLight(x, y, z, pal, radius, base) {
+    if (xfOn) { const p = xfPoint(x, z); x = p.x; z = p.z; }
     lights.push({ x, y, z, r: pal[0], g: pal[1], b: pal[2], radius, intensity: base, base });
   }
 
@@ -385,6 +429,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   }
   for (let i = 0; i < picked.length; i++) {
     const c = picked[i];
+    setXform(c.xfPX, c.xfPZ, c.xfYaw);   // signs follow their building's warp
     const seed = rng();
     const pal = NEON_PAL[Math.min(3, Math.floor(seed * 3.999))];
     const flags = F_NEON | (flick && i === 0 ? F_FLICK : 0);
@@ -424,6 +469,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       const lz = axis === 0 ? c.a0 + uc : c.plane + s * 0.7;
       pushLight(lx, yb + sh / 2, lz, pal, Math.min(14, 6 + sw * sh * 0.9), Math.min(3.2, 1.4 + sw * sh * 0.18));
     }
+    clearXform();
   }
 
   // -- rooftop sign frame on some blocks ------------------------------------
@@ -434,6 +480,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     });
     if (roofOk.length > 0) {
       const c = roofOk[(rng() * roofOk.length) | 0];
+      setXform(c.xfPX, c.xfPZ, c.xfYaw);
       const seed = rng();
       const pal = NEON_PAL[Math.min(3, Math.floor(seed * 3.999))];
       const axis = c.nx !== 0 ? 0 : 1;
@@ -457,6 +504,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       const lx = axis === 0 ? plane + s * 0.8 : mid;
       const lz = axis === 0 ? mid : plane + s * 0.8;
       pushLight(lx, yb + rh / 2, lz, pal, 16, 3.0);
+      clearXform();
     }
   }
 }

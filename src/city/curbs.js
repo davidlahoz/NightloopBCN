@@ -32,6 +32,7 @@ import commonWgsl from '../shaders/common.wgsl?raw';
 import {
   PERIOD_X, PERIOD_Z, CURB_FACE, CURB_W, CURB_H, CORNER_R,
   rowFace, blocksInRegion, segmentsInRegion, crossingsInRegion, cellSeed,
+  gridToWorld, sampleRoadSpace,
 } from './cityPlan.js';
 import { groundHeight, groundNormal, crossProfile } from './roadProfile.js';
 import { valueNoise, hash2 } from './noise.js';
@@ -76,6 +77,7 @@ const CURB_V = (() => {
 })();
 
 const _gn = { x: 0, y: 1, z: 0 }; // groundNormal scratch (build-time only)
+const _gw = { x: 0, z: 0 };       // gridToWorld scratch (build-time only)
 
 // ---------------------------------------------------------------------------
 // Geometry accumulation. quad() picks triangle winding per-quad by testing the
@@ -172,8 +174,38 @@ function addArc(pts, cx, cz, a0, a1, u0, skipFirst) {
 }
 
 /**
- * Closed curb-line loop around block (ix, jz): 4 straights + 4 fillet arcs,
- * cyclic S → E → N → W. E-W rows use their own curb face (motorways wider).
+ * Project a world point onto the exact (warped) d=0 curb contour and derive
+ * the outward normal from the SDF gradient. Mutates p {x, z, nx, nz}.
+ */
+const _crsA = { iA: 0, tA: 0, dA: 0, iB: 0, tB: 0, dB: 0, d: 0, wB: 0 };
+function projectToContour(p) {
+  const e = 0.03;
+  let gx = 0, gz = 1;
+  for (let it = 0; it < 3; it++) {
+    sampleRoadSpace(p.x, p.z, _crsA);
+    const d = _crsA.d;
+    sampleRoadSpace(p.x + e, p.z, _crsA); const dx1 = _crsA.d;
+    sampleRoadSpace(p.x - e, p.z, _crsA); const dx0 = _crsA.d;
+    sampleRoadSpace(p.x, p.z + e, _crsA); const dz1 = _crsA.d;
+    sampleRoadSpace(p.x, p.z - e, _crsA); const dz0 = _crsA.d;
+    gx = (dx1 - dx0) / (2 * e); gz = (dz1 - dz0) / (2 * e);
+    const gl = Math.hypot(gx, gz);
+    if (gl < 1e-5) break;
+    gx /= gl; gz /= gl;
+    if (Math.abs(d) < 0.003) break;
+    let sx = gx * d, sz = gz * d;
+    const sl = Math.hypot(sx, sz);
+    if (sl > 0.6) { sx *= 0.6 / sl; sz *= 0.6 / sl; }
+    p.x -= sx; p.z -= sz;
+  }
+  p.nx = gx; p.nz = gz;   // toward increasing d = into the block
+}
+
+/**
+ * Closed curb-line loop around block (ix, jz): 4 straights + 4 fillet arcs
+ * generated in GRID space, then each point is mapped through the street-
+ * curvature warp and projected onto the exact d=0 contour — the band bends
+ * with the streets. u = accumulated WORLD arc length (texture continuity).
  */
 function buildBlockLoop(ix, jz) {
   const w = ix * PERIOD_X, e = (ix + 1) * PERIOD_X;
@@ -186,16 +218,27 @@ function buildBlockLoop(ix, jz) {
     { x0: e - fC - R, z0: n - fN, x1: w + fC + R, z1: n - fN, nx: 0, nz: -1 },
     { x0: w + fC, z0: n - fN - R, x1: w + fC, z1: s + fS + R, nx: 1, nz: 0 },
   ];
-  const pts = [];
-  let u = 0;
+  const gridPts = [];
+  let gu = 0;
   for (let k = 0; k < 4; k++) {
     const sd = sides[k];
-    u = addStraight(pts, sd.x0, sd.z0, sd.x1, sd.z1, sd.nx, sd.nz, u, pts.length > 0);
+    gu = addStraight(gridPts, sd.x0, sd.z0, sd.x1, sd.z1, sd.nx, sd.nz, gu, gridPts.length > 0);
     const nxt = sides[(k + 1) % 4];
     const ccx = sd.x1 + sd.nx * R, ccz = sd.z1 + sd.nz * R;
     const a0 = Math.atan2(sd.z1 - ccz, sd.x1 - ccx);
     const a1 = Math.atan2(nxt.z0 - ccz, nxt.x0 - ccx);
-    u = addArc(pts, ccx, ccz, a0, a1, u, true);
+    gu = addArc(gridPts, ccx, ccz, a0, a1, gu, true);
+  }
+  const pts = [];
+  const pw = { x: 0, z: 0, nx: 0, nz: 1 };
+  let u = 0, px = 0, pz = 0;
+  for (let i = 0; i < gridPts.length; i++) {
+    const g = gridPts[i];
+    gridToWorld(g.x, g.z, pw);
+    projectToContour(pw);
+    if (i > 0) u += Math.hypot(pw.x - px, pw.z - pz);
+    px = pw.x; pz = pw.z;
+    pts.push({ x: pw.x, z: pw.z, nx: pw.nx, nz: pw.nz, u });
   }
   return pts;
 }
@@ -551,9 +594,10 @@ export class Curbs {
           const ht = cellSeed(seg.axis * 7919 + seg.line, Math.round(seg.s0), 17 + k);
           const s = seg.s0 + len * (0.18 + 0.64 * hs);
           const t = (ht > 0.5 ? 1 : -1) * (1.2 + (ht * 7919 % 1) * 1.6);
-          const x = seg.axis === 0 ? seg.center + t : s;
-          const z = seg.axis === 0 ? s : seg.center + t;
-          items.push({ x, z, yaw: hs * Math.PI * 2 });
+          const gx = seg.axis === 0 ? seg.center + t : s;
+          const gz = seg.axis === 0 ? s : seg.center + t;
+          gridToWorld(gx, gz, _gw);
+          items.push({ x: _gw.x, z: _gw.z, yaw: hs * Math.PI * 2 });
         }
       }
       const buf = new Float32Array(Math.max(1, items.length) * 16);
@@ -576,9 +620,10 @@ export class Curbs {
         for (let sx = -1; sx <= 1; sx += 2) {
           for (let sz = -1; sz <= 1; sz += 2) {
             const onNS = sx * sz > 0;      // alternate arms around each corner
-            const x = onNS ? it.x + sx * (CURB_FACE - 0.25) : it.x + sx * (CURB_FACE + CORNER_R + 0.9);
-            const z = onNS ? it.z + sz * (fB + CORNER_R + 0.9) : it.z + sz * (fB - 0.25);
-            writeInstance(buf, k, x, z, 0.010, onNS ? Math.PI / 2 : 0, 0.2);
+            const gx = onNS ? it.x + sx * (CURB_FACE - 0.25) : it.x + sx * (CURB_FACE + CORNER_R + 0.9);
+            const gz = onNS ? it.z + sz * (fB + CORNER_R + 0.9) : it.z + sz * (fB - 0.25);
+            gridToWorld(gx, gz, _gw);
+            writeInstance(buf, k, _gw.x, _gw.z, 0.010, onNS ? Math.PI / 2 : 0, 0.2);
             k++;
           }
         }

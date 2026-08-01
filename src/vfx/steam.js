@@ -8,7 +8,9 @@ import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
 import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowIsMotorway } from '../city/cityPlan.js';
+import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowIsMotorway, gridToWorld } from '../city/cityPlan.js';
+
+const _gw = { x: 0, z: 0 };
 import { groundHeight } from '../city/roadProfile.js';
 import { hash2 } from '../city/noise.js';
 import steamVertex from '../shaders/steam.vertex.wgsl?raw';
@@ -99,8 +101,12 @@ export class Steam {
     let q = 0;
     for (let v = 0; v < VENT_DEFS.length; v++) {
       const d = VENT_DEFS[v];
-      const vx = d.ax === 0 ? ic * PERIOD_X + d.t : carX + d.s;
-      const vz = d.ax === 0 ? carZ + d.s : jr * PERIOD_Z + d.t;
+      gridToWorld(
+        d.ax === 0 ? ic * PERIOD_X + d.t : carX + d.s,
+        d.ax === 0 ? carZ + d.s : jr * PERIOD_Z + d.t,
+        _gw,
+      );
+      const vx = _gw.x, vz = _gw.z;
       const vy = groundHeight(vx, vz);
       for (let p = 0; p < PUFFS_PER_VENT; p++) {
         for (let c = 0; c < 4; c++) {
