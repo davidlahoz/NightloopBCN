@@ -26,6 +26,7 @@ defineParam('carGrip', 9.0, { label: 'grip', section: 'car', min: 2, max: 20, st
 defineParam('carGlideGrip', 1.7, { label: 'glide grip', section: 'car', min: 0.3, max: 6, step: 0.1 });
 defineParam('carSteerMax', 0.52, { label: 'steer max rad', section: 'car', min: 0.2, max: 0.9, step: 0.01 });
 defineParam('carGlideYawGain', 1.35, { label: 'glide yaw gain', section: 'car', min: 0.5, max: 3, step: 0.05 });
+defineParam('carWetGrip', 0.28, { label: 'wet grip loss', section: 'car', min: 0, max: 0.5, step: 0.01 });
 
 const WHEELBASE = 2.62;
 const TRACK = 1.56;   // slightly wider than spec: plants the tyres flush with the fenders
@@ -237,16 +238,27 @@ export class Car {
    * @param {(x:number,z:number)=>number} groundHeight
    */
   update(dt, input, groundHeight) {
+    // ---- surface conditions ----
+    // wet streets grip less (the night street is damp — slides carry), and
+    // sidewalks/paving grip less than asphalt. offRoad uses last frame's
+    // road-space test from the collider block (1-frame lag is fine).
+    const wet = params.roadWetness;
+    const offRoad = this._wasOnRoad === false;
+    const surfGrip = (offRoad ? 0.72 : 1) * (1 - wet * params.carWetGrip);
+
     // ---- steering (mouse carves the line while gliding) ----
     if (input.gliding) this.carve += input.mouseDX * 0.0011;
     this.carve -= this.carve * DAMP(input.gliding ? 1.1 : 6.0, dt);
     if (this.carve > 0.55) this.carve = 0.55;
     if (this.carve < -0.55) this.carve = -0.55;
-    const speedFade = 1 / (1 + Math.abs(this.vz) * 0.045);
+    const av = Math.abs(this.vz);
+    // steering authority falls with speed, harder past ~110 km/h, and the
+    // wheel itself responds slower — no darty flicks at 200 km/h
+    const speedFade = 1 / (1 + av * 0.045 + Math.max(0, av - 30) * 0.03);
     // gliding softens keyboard lock into a wide, committed arc
     const kbScale = 1 - this.driftAmount * 0.55;
     const steerTarget = (input.steer * params.carSteerMax * kbScale + this.carve) * speedFade;
-    this.steerAngle += (steerTarget - this.steerAngle) * DAMP(8, dt);
+    this.steerAngle += (steerTarget - this.steerAngle) * DAMP(8 - Math.min(3.2, av * 0.055), dt);
 
     // ---- glide state eases in/out (handbrake at speed also breaks the rear loose) ----
     const glideTarget = (input.gliding || input.handbrake) && Math.abs(this.vz) > 6 ? 1 : 0;
@@ -256,26 +268,45 @@ export class Car {
     let az = 0;
     const topSpeed = params.carTopSpeed;
     this.braking = false;
-    if (input.throttle > 0) az += params.carAccel * (1 - Math.max(0, this.vz) / topSpeed);
-    if (input.brake > 0) {
-      if (this.vz > 0.5) { az -= params.carBrake; this.braking = true; }
-      else az -= params.carAccel * 0.55;
+    if (input.throttle > 0) {
+      // launch traction: scrubbing tyres (drift, handbrake) can't also push
+      // at full force — straighten out to put the power down
+      const traction = (1 - this.scrub * 0.45) * (offRoad ? 0.8 : 1) * (1 - wet * 0.12);
+      az += params.carAccel * (1 - Math.max(0, this.vz) / topSpeed) * traction;
     }
-    // handbrake: locked rears drag hard (less than the pedal, never reverses)
+    if (input.brake > 0) {
+      if (this.vz > 0.5) {
+        // wet tarmac and paving stones both stretch the stopping distance
+        az -= params.carBrake * (1 - wet * 0.25) * (offRoad ? 0.85 : 1);
+        this.braking = true;
+      } else if (this.vz > -11) {
+        az -= params.carAccel * 0.55;   // reverse, capped ~40 km/h
+      }
+    }
+    // handbrake: locked rears drag hard (less than the pedal, never
+    // reverses); locked wheels on a wet street slide further
     if (input.handbrake && Math.abs(this.vz) > 0.5) {
-      az -= Math.sign(this.vz) * 8.5;
+      az -= Math.sign(this.vz) * 8.5 * (0.7 + 0.3 * surfGrip);
       this.braking = true;
     }
-    az -= this.vz * 0.045 + Math.sign(this.vz) * 0.35;
-    // drift scrub: sliding sideways bleeds speed (weighty, not floaty)
-    az -= Math.abs(this.vx) * 0.15 * this.driftAmount;
+    az -= this.vz * (offRoad ? 0.105 : 0.045) + Math.sign(this.vz) * 0.35;
+    // drift scrub: sliding sideways bleeds speed (weighty, not floaty);
+    // on a wet street the slide carries with less bite
+    az -= Math.abs(this.vx) * 0.15 * this.driftAmount * (0.6 + 0.4 * surfGrip);
     this.vz += az * dt;
     if (Math.abs(this.vz) < 0.15 && input.throttle === 0 && input.brake === 0) this.vz = 0;
 
     // ---- yaw ----
     const kinYawRate = (this.vz / WHEELBASE) * Math.tan(this.steerAngle);
     const driftYawRate = kinYawRate * params.carGlideYawGain;
-    const targetYawRate = kinYawRate + (driftYawRate - kinYawRate) * this.driftAmount;
+    let targetYawRate = kinYawRate + (driftYawRate - kinYawRate) * this.driftAmount;
+    // stability: the tyres can only demand so much lateral acceleration —
+    // full lock at 140 km/h arcs wide instead of snap-spinning. Gliding
+    // raises the cap so committed drifts stay as big as ever.
+    const latCap = (15 + this.driftAmount * 26) * surfGrip;
+    const maxYaw = latCap / Math.max(4, av);
+    if (targetYawRate > maxYaw) targetYawRate = maxYaw;
+    else if (targetYawRate < -maxYaw) targetYawRate = -maxYaw;
     this.yawRate += (targetYawRate - this.yawRate) * DAMP(6 - this.driftAmount * 2.5, dt);
     this.yaw += this.yawRate * dt;
 
@@ -286,7 +317,7 @@ export class Car {
     this.vx += -this.yawRate * this.vz * dt * (0.25 + this.driftAmount * 0.75) * sourceFade;
     // tyres saturate: past ~26° of slip the grip climbs steeply back
     const satBoost = 1 + Math.max(0, slipNow - 0.45) * 7.0;
-    const grip = (params.carGrip + (params.carGlideGrip - params.carGrip) * this.driftAmount) * satBoost;
+    const grip = (params.carGrip + (params.carGlideGrip - params.carGrip) * this.driftAmount) * satBoost * surfGrip;
     const vxDecay = this.vx * DAMP(grip, dt);
     this.vx -= vxDecay;
     this.lateralG = (vxDecay / dt || 0) / 9.81;
@@ -381,10 +412,12 @@ export class Car {
     this.scrub = this.speed > 3
       ? Math.min(1, Math.abs(this.vx) * 0.10 + this.driftAmount * 0.35 + (input.handbrake ? 0.45 : 0))
       : 0;
-    // forgiving: past ~30° of slip the rear catches — no surprise spins
-    if (this.driftAmount > 0.2) {
+    // forgiving: past ~30° of slip the rear catches — no surprise spins.
+    // A base recovery is always on (kerb hits, wet snaps); drifting adds the
+    // strong catch it always had.
+    if (this.speed > 5) {
       const overshoot = Math.abs(this.slipYawOffset) - 0.52;
-      if (overshoot > 0) this.yawRate -= Math.sign(this.slipYawOffset) * overshoot * 3.0 * dt * this.driftAmount * 10;
+      if (overshoot > 0) this.yawRate -= Math.sign(this.slipYawOffset) * overshoot * dt * (8 + this.driftAmount * 22);
     }
     this.localAccelZ = (this.vz - this._prevVz) / (dt || 1);
     const latAccel = (this.vx - this._prevVx) / (dt || 1);
