@@ -29,7 +29,11 @@ fn main(input : VertexInputs) -> FragmentInputs {
 
   let eye = scene.vEyePosition.xyz;
   let toCam = normalize(eye - cpos);
-  let right = normalize(cross(vec3f(0.0, 1.0, 0.0), toCam));
+  // guard the billboard basis: looking straight down makes cross(Y, toCam)
+  // degenerate and normalize(0) = NaN → garbage black quads on screen
+  var rightRaw = cross(vec3f(0.0, 1.0, 0.0), toCam);
+  let rl = length(rightRaw);
+  let right = select(vec3f(1.0, 0.0, 0.0), rightRaw / rl, rl > 1e-4);
   let up = cross(toCam, right);
   let size = (0.5 + t * 1.9) * (0.8 + r * 0.5);
   let wp = cpos + right * (input.position.x * size) + up * (input.position.y * size);

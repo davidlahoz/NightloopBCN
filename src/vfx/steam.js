@@ -67,7 +67,9 @@ export class Steam {
     vd.positions = pos;
     vd.indices = idx;
     vd.applyToMesh(mesh);
-    mesh.setVerticesData('vent', this._vent, false, 3);
+    // 'vent' MUST be updatable: _reanchor rewrites it as the car crosses
+    // cells (updating a non-updatable buffer corrupts the quads on WebGPU)
+    mesh.setVerticesData('vent', this._vent, true, 3);
     mesh.setVerticesData('phase', phase, false, 2);
     mesh.material = mat;
     mesh.isPickable = false;
