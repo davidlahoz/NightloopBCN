@@ -132,9 +132,16 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     var floorHs = array<f32, 6>(3.0, 3.2, 3.6, 3.05, 3.45, 3.25);
     var cellWs = array<f32, 6>(1.70, 2.20, 2.60, 1.55, 2.00, 2.35);
     var winFs = array<f32, 6>(0.52, 0.62, 0.72, 0.46, 0.55, 0.66);
-    let floorH = floorHs[style];
-    let cellW = cellWs[style];
-    let winF = winFs[style];
+    var floorH = floorHs[style];
+    var cellW = cellWs[style];
+    var winF = winFs[style];
+    if (dTint == 3u) {
+      // industrial: a few tall floors of BIG multi-pane bays
+      floorH = 4.6; cellW = 4.4; winF = 0.64;
+    } else if (dTint == 1u) {
+      // residential: small punched windows, tight floors
+      floorH = 2.95; cellW = max(1.45, cellW * 0.7); winF = min(winF, 0.42);
+    }
 
     // per-building wall albedo: brick red-browns, warm greys, muted ochres
     var wallPal = array<vec3f, 6>(
@@ -153,18 +160,24 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
       vec3f(1.00, 1.00, 1.00),   // commercial: as authored
       vec3f(1.14, 0.94, 0.82),   // residential: warm brick
       vec3f(0.80, 0.86, 1.00),   // downtown: cool concrete/glass
-      vec3f(0.90, 0.89, 0.84),   // industrial: drab
+      vec3f(1.00, 0.97, 0.94),   // industrial: near-neutral (brick is forced)
     );
     wall = wall * dPal[dTint];
+    if (dTint == 3u) {
+      // industrial is ALWAYS heavy old brick, deep reds and browns
+      wall = mix(vec3f(0.290, 0.142, 0.098), vec3f(0.225, 0.118, 0.088), fract(seed * 9.13));
+    }
     // large-scale tone drift + fine material grain
     let tone = nlFbm3(vec2f(u * 0.045 + seed * 61.0, v * 0.045));
     wall = wall * (0.84 + 0.34 * tone);
     wall = wall * (0.93 + 0.14 * nlValueNoise(vec2f(u, v) * 3.4));
-    // brick coursing on masonry styles, gone at distance
-    if (style == 0u || style == 1u || style == 5u) {
+    // brick coursing on masonry styles, gone at distance; industrial and
+    // residential districts are always masonry, industrial reads heaviest
+    if (style == 0u || style == 1u || style == 5u || dTint == 1u || dTint == 3u) {
       let course = fract(v * 2.985);
       let cl = 1.0 - smoothstep(0.06, 0.18, min(course, 1.0 - course));
-      wall = wall * (1.0 - 0.09 * cl * detailFade);
+      let amp = select(0.09, 0.14, dTint == 3u);
+      wall = wall * (1.0 - amp * cl * detailFade);
     }
     // grime: dark base, sooty streaks under the parapet
     let baseGrime = (1.0 - smoothstep(0.0, 3.2, v)) * 0.38;
@@ -247,7 +260,43 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
 
     } else {
       // ---- ground floor ----
-      if (isFront) {
+      if (isFront && dTint == 3u) {
+        // industrial: loading docks — corrugated roll-up doors in brick piers
+        let nBay = max(1.0, floor(facadeW / 7.6));
+        let bayW = facadeW / nBay;
+        let bu = fract(u / bayW) * bayW;
+        let pier = 1.05;
+        let dU = smoothstep(pier, pier + 0.08, bu) * (1.0 - smoothstep(bayW - pier - 0.08, bayW - pier, bu));
+        let dV = smoothstep(0.14, 0.26, v) * (1.0 - smoothstep(3.55, 3.75, v));
+        let doorM = dU * dV;
+        let cor = 0.80 + 0.20 * (0.5 + 0.5 * sin(v * 14.0));
+        let stain = 0.75 + 0.5 * nlValueNoise(vec2f(u * 0.6 + seed * 23.0, v * 0.6));
+        let dcol = mix(vec3f(0.085, 0.082, 0.078), vec3f(0.155, 0.135, 0.115), fract(seed * 5.7));
+        albedo = mix(albedo, dcol * cor * stain, doorM);
+        // painted lintel band over the docks
+        let lintel = smoothstep(3.75, 3.90, v) * (1.0 - smoothstep(4.25, 4.40, v));
+        albedo = mix(albedo, albedo * 0.55 + vec3f(0.02, 0.02, 0.02), lintel * 0.6);
+
+      } else if (isFront && dTint == 1u) {
+        // residential: front doors with steps + small ground-floor windows
+        let bayW = 5.6;
+        let bu = fract(u / bayW) * bayW;
+        let doorM = smoothstep(0.55, 0.65, bu) * (1.0 - smoothstep(1.55, 1.65, bu))
+                  * step(v, 2.25) * step(0.12, v);
+        let dcol = mix(vec3f(0.115, 0.055, 0.030), vec3f(0.045, 0.070, 0.075), step(0.5, fract(seed * 3.3)));
+        albedo = mix(albedo, dcol * (0.8 + 0.4 * fract(seed * 17.0)), doorM);
+        let stepM = step(v, 0.14) * smoothstep(0.35, 0.45, bu) * (1.0 - smoothstep(1.75, 1.85, bu));
+        albedo = mix(albedo, vec3f(0.16, 0.155, 0.150), stepM);
+        let wU = smoothstep(2.7, 2.8, bu) * (1.0 - smoothstep(4.1, 4.2, bu));
+        let wV = smoothstep(0.95, 1.05, v) * (1.0 - smoothstep(2.45, 2.55, v));
+        let winM = wU * wV;
+        let gr = nlHash2v(vec2<i32>(i32(floor(u / bayW)) + iseed * 3, 77));
+        let litW = step(gr.x, uniforms.windowLitFraction * 0.8);
+        albedo = mix(albedo, vec3f(0.030, 0.032, 0.036), winM);
+        emis = emis + mix(uniforms.ambientSky * (uniforms.ambientIntensity * 0.08),
+                          vec3f(1.0, 0.72, 0.42) * (0.5 + gr.y), litW) * winM;
+
+      } else if (isFront) {
         // storefront band: tall glazing, fascia sign strip, occasional shutter
         let sf = nlHash2v(vec2<i32>(iseed, 91));
         let sf2 = nlHash2v(vec2<i32>(iseed, 173));
@@ -261,7 +310,8 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
         let gV = smoothstep(0.50, 0.62, v) * (1.0 - smoothstep(3.10, 3.22, v));
         let glassM = gU * gV;
         let fasciaM = smoothstep(3.34, 3.46, v) * (1.0 - smoothstep(4.12, 4.24, v));
-        let litShop = step(sf.x, 0.44);
+        // the commercial district is the shopping strip: most shops lit
+        let litShop = step(sf.x, select(0.44, 0.70, dTint == 0u));
         let shut = step(0.86, sf.x);
         var shopPal = array<vec3f, 5>(
           vec3f(1.00, 0.88, 0.66),

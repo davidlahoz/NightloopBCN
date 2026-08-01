@@ -62,12 +62,19 @@ function mulberry32(a) {
   };
 }
 
-/** Split an edge length into 1-4 frontage widths of pleasing variety. */
-function splitSpan(len, rng, wide) {
-  let n = Math.round(len / (wide ? 30 + rng() * 14 : 20 + rng() * 9));
+/**
+ * Split an edge length into frontage widths. mode 0 = normal (1-4 mid
+ * parcels), 1 = industrial (1-3 huge warehouse frontages), 2 = residential
+ * (up to 12 narrow house parcels).
+ */
+function splitSpan(len, rng, mode) {
+  let target = 20 + rng() * 9, minW = 9, cap = 4;
+  if (mode === 1) { target = 40 + rng() * 20; minW = 22; cap = 3; }
+  else if (mode === 2) { target = 10.5 + rng() * 3; minW = 7; cap = 12; }
+  let n = Math.round(len / target);
   if (n < 1) n = 1;
-  if (n > 4) n = 4;
-  while (n > 1 && len / n < (wide ? 14 : 9)) n--;
+  if (n > cap) n = cap;
+  while (n > 1 && len / n < minW) n--;
   const ws = [];
   let sum = 0;
   for (let i = 0; i < n; i++) { const w = 0.72 + rng() * 0.56; ws.push(w); sum += w; }
@@ -76,12 +83,12 @@ function splitSpan(len, rng, wide) {
 }
 
 // per-district character — heights, façade style pool, sign density, vacant
-// lot chance, frontage width, wall tint (bits 8-9 of the facade flags)
+// lot chance, parcel split mode, wall tint (bits 8-9 of the facade flags)
 const DISTRICTS = [
-  { hLo: 24, hHi: 60, styles: [2, 4, 2, 3, 4], signs: 1.6, lot: 0.02, wide: 0, tint: 2 << 8, towers: 0.5 },  // downtown
-  { hLo: 13, hHi: 40, styles: [0, 1, 2, 3, 4, 5], signs: 1.0, lot: 0.05, wide: 0, tint: 0, towers: 0.35 },   // commercial
-  { hLo: 9, hHi: 21, styles: [0, 1, 5, 0, 5], signs: 0.35, lot: 0.07, wide: 0, tint: 1 << 8, towers: 0.10 }, // residential
-  { hLo: 7, hHi: 15, styles: [3, 5, 3, 1], signs: 0.15, lot: 0.14, wide: 1, tint: 3 << 8, towers: 0.06 },    // industrial
+  { hLo: 24, hHi: 60, styles: [2, 4, 2, 3, 4], signs: 1.6, lot: 0.02, split: 0, tint: 2 << 8, towers: 0.5 },  // downtown
+  { hLo: 13, hHi: 40, styles: [0, 1, 2, 3, 4, 5], signs: 1.7, lot: 0.05, split: 0, tint: 0, towers: 0.35 },   // commercial: the shopping strip
+  { hLo: 9, hHi: 21, styles: [0, 1, 5, 0, 5], signs: 0.35, lot: 0.07, split: 2, tint: 1 << 8, towers: 0.10 }, // residential: houses + apartments
+  { hLo: 8, hHi: 17, styles: [3, 5, 3, 1], signs: 0.15, lot: 0.14, split: 1, tint: 3 << 8, towers: 0.06 },    // industrial: big brick warehouses
 ];
 
 /**
@@ -158,6 +165,21 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   function upFace(x0, z0, x1, z1, y, seed, flags) {
     if (x1 - x0 <= 0.01 || z1 - z0 <= 0.01) return;
     quad(x0, y, z0, x1 - x0, 0, 0, 0, 0, z1 - z0, 0, 1, 0, 0, x1 - x0, 5, 5, seed, flags, x1 - x0, 1);
+  }
+
+  /** Single triangle (gable ends). Vertex order must satisfy cross = -normal. */
+  function tri(ax, ay, az, bx2, by2, bz2, cx2, cy2, cz2, nx, ny, nz, seed, flags, w, top) {
+    if (xfOn) {
+      let p = xfPoint(ax, az); ax = p.x; az = p.z;
+      p = xfPoint(bx2, bz2); bx2 = p.x; bz2 = p.z;
+      p = xfPoint(cx2, cz2); cx2 = p.x; cz2 = p.z;
+      const t = nx * xfC + nz * xfS; nz = -nx * xfS + nz * xfC; nx = t;
+    }
+    const b = pos.length / 3;
+    pos.push(ax, ay, az, bx2, by2, bz2, cx2, cy2, cz2);
+    for (let k = 0; k < 3; k++) { nor.push(nx, ny, nz); col.push(seed, flags + DIST.tint, w, top); }
+    uvs.push(0, 0, w, 0, w * 0.5, top);
+    idx.push(b, b + 1, b + 2);
   }
 
   function downFace(x0, z0, x1, z1, y, seed, flags) {
@@ -267,7 +289,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const seed = rng();
     const style = DIST.styles[(rng() * DIST.styles.length) | 0];
     const setback = rng() < 0.22 ? 0.5 + rng() * 1.5 : 0;
-    const depth = 11 + rng() * 8;
+    const depth = district === 3 ? 15 + rng() * 7 : 11 + rng() * 8;   // warehouses run deep
     const gap = 0.03;
     let bx0, bx1, bz0, bz1, frontPlane;
     const fronts = { xm: false, xp: false, zm: false, zp: false };
@@ -298,6 +320,51 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const wfx = wf.x, wfz = wf.z;
     const vOff = groundHeight(wfx, wfz);
     const yBase = vOff - 0.9;
+
+    // ---- residential houses: narrow parcels become gabled row houses ----
+    const width = o.nx !== 0 ? bz1 - bz0 : bx1 - bx0;
+    if (district === 2 && width < 14.5 && rng() < 0.72) {
+      // pull the back edge in — houses are shallower than tenements
+      const hDepth = 8 + rng() * 3;
+      if (o.nx < 0) bx1 = bx0 + hDepth;
+      else if (o.nx > 0) bx0 = bx1 - hDepth;
+      else if (o.nz < 0) bz1 = bz0 + hDepth;
+      else bz0 = bz1 - hDepth;
+      const eaveY = vOff + 6.0 + rng() * 3.0;
+      const ridgeY = eaveY + 1.7 + rng() * 1.1;
+      const topRel = eaveY - vOff;
+      wallFace(0, -1, bx0, bz0, bz1, yBase, eaveY, seed, style | (fronts.xm ? F_FRONT : 0), topRel, vOff);
+      wallFace(0, 1, bx1, bz0, bz1, yBase, eaveY, seed, style | (fronts.xp ? F_FRONT : 0), topRel, vOff);
+      wallFace(1, -1, bz0, bx0, bx1, yBase, eaveY, seed, style | (fronts.zm ? F_FRONT : 0), topRel, vOff);
+      wallFace(1, 1, bz1, bx0, bx1, yBase, eaveY, seed, style | (fronts.zp ? F_FRONT : 0), topRel, vOff);
+      const rf = style | F_ROOF;
+      const H = ridgeY - eaveY;
+      if (o.nx !== 0) {
+        // ridge runs along z
+        const xm = (bx0 + bx1) / 2, D = xm - bx0, W = bz1 - bz0;
+        const L = Math.hypot(H, D);
+        quad(bx0, eaveY, bz1, 0, 0, -W, D, H, 0, -H / L, D / L, 0, 0, W, 0, L, seed, rf, W, H);
+        quad(bx1, eaveY, bz0, 0, 0, W, -D, H, 0, H / L, D / L, 0, 0, W, 0, L, seed, rf, W, H);
+        tri(bx0, eaveY, bz0, bx1, eaveY, bz0, xm, ridgeY, bz0, 0, 0, -1, seed, style, bx1 - bx0, H);
+        tri(bx1, eaveY, bz1, bx0, eaveY, bz1, xm, ridgeY, bz1, 0, 0, 1, seed, style, bx1 - bx0, H);
+      } else {
+        // ridge runs along x
+        const zm = (bz0 + bz1) / 2, D = zm - bz0, L2 = bx1 - bx0;
+        const L = Math.hypot(H, D);
+        quad(bx0, eaveY, bz0, L2, 0, 0, 0, H, D, 0, D / L, -H / L, 0, L2, 0, L, seed, rf, L2, H);
+        quad(bx1, eaveY, bz1, -L2, 0, 0, 0, H, -D, 0, D / L, H / L, 0, L2, 0, L, seed, rf, L2, H);
+        tri(bx0, eaveY, bz1, bx0, eaveY, bz0, bx0, ridgeY, zm, -1, 0, 0, seed, style, bz1 - bz0, H);
+        tri(bx1, eaveY, bz0, bx1, eaveY, bz1, bx1, ridgeY, zm, 1, 0, 0, seed, style, bz1 - bz0, H);
+      }
+      clearXform();
+      frontCands.push({
+        nx: o.nx, nz: o.nz, plane: frontPlane,
+        a0: o.nx !== 0 ? bz0 : bx0,
+        w: width, vOff, h1: topRel, fx: wfx, fz: wfz, dInt: Infinity,
+        xfPX: fx, xfPZ: fz, xfYaw: dyaw,
+      });
+      return setback + hDepth + 0.15;
+    }
 
     const span = DIST.hHi - DIST.hLo;
     let h = DIST.hLo + hBias * span * 0.65 + rng() * span * 0.35;
@@ -431,7 +498,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   // N-S facing edges first — their corner buildings claim the corners
   for (const sgn of [-1, 1]) {
     const plane = sgn < 0 ? rect.x0 : rect.x1;
-    const ws = splitSpan(rect.z1 - rect.z0, rng, DIST.wide);
+    const ws = splitSpan(rect.z1 - rect.z0, rng, DIST.split);
     let a = rect.z0;
     for (let i = 0; i < ws.length; i++) {
       const corner = i === 0 || i === ws.length - 1;
@@ -459,7 +526,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const insHigh = sgn < 0 ? ins.sex : ins.nex;
     const s0 = rect.x0 + insLow, s1 = rect.x1 - insHigh;
     if (s1 - s0 < 9) continue;
-    const ws = splitSpan(s1 - s0, rng, DIST.wide);
+    const ws = splitSpan(s1 - s0, rng, DIST.split);
     let a = s0;
     for (const w of ws) {
       const o = { nx: 0, nz: sgn, plane, a0: a, a1: a + w, frontLow: false, frontHigh: false };
