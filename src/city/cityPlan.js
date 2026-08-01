@@ -182,6 +182,35 @@ export function zoneOf(d) {
   return ZONE_BLOCK;
 }
 
+// ---------------------------------------------------------------------------
+// Districts — macro cells of 3×3 blocks pick a character so variety CLUSTERS
+// instead of averaging out: 0 downtown (tall, glassy, neon), 1 commercial
+// (the original mid-rise mix), 2 residential (low warm brick), 3 industrial
+// (low wide sheds, vacant lots). Pure hashing: zero runtime cost.
+// ---------------------------------------------------------------------------
+export const DISTRICT_DOWNTOWN = 0;
+export const DISTRICT_COMMERCIAL = 1;
+export const DISTRICT_RESIDENTIAL = 2;
+export const DISTRICT_INDUSTRIAL = 3;
+
+export function districtOf(ix, jz) {
+  const mi = Math.floor(ix / 3), mj = Math.floor(jz / 3);
+  // the spawn neighbourhood is always the lively commercial mix — the first
+  // impression should be the hero look, districts unfold as you drive out
+  if (mi >= -1 && mi <= 0 && mj >= -1 && mj <= 0) return DISTRICT_COMMERCIAL;
+  const r = cellSeed(mi, mj, 977);
+  if (r < 0.24) return DISTRICT_DOWNTOWN;
+  if (r < 0.56) return DISTRICT_COMMERCIAL;
+  if (r < 0.82) return DISTRICT_RESIDENTIAL;
+  return DISTRICT_INDUSTRIAL;
+}
+
+/** Height bias 0..1 that clusters at macro scale (downtown cores read on the skyline). */
+export function districtHeightBias(ix, jz) {
+  const mi = Math.floor(ix / 3), mj = Math.floor(jz / 3);
+  return 0.55 * cellSeed(mi, mj, 31) + 0.45 * cellSeed(ix, jz, 5);
+}
+
 /** Deterministic per-cell seed in [0,1). */
 export function cellSeed(i, j, salt = 0) {
   let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(salt, 2246822519)) | 0;

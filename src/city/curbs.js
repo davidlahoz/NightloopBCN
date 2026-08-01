@@ -52,7 +52,7 @@ const ROWS_PER_SLICE = 40;
 // up) and sampling exactly at 3.0 would flip branches per-vertex on FP noise.
 // ---------------------------------------------------------------------------
 const CURB_STATIONS = [0, 0.03, 0.07, 0.11, 0.15];
-const WALK_STATIONS = [0.15, 0.5, 1.0, 1.6, 2.3, 2.997, 3.003];
+const WALK_STATIONS = [0.15, 0.5, 1.0, 1.6, 2.3, 3.0];
 const STEP_STRAIGHT = 0.4;
 const STEP_ARC = 0.12;
 const NRM_EPS = 0.04;
@@ -229,16 +229,50 @@ function buildBlockLoop(ix, jz) {
     const a1 = Math.atan2(nxt.z0 - ccz, nxt.x0 - ccx);
     gu = addArc(gridPts, ccx, ccz, a0, a1, gu, true);
   }
-  const pts = [];
+  const raw = [];
   const pw = { x: 0, z: 0, nx: 0, nz: 1 };
-  let u = 0, px = 0, pz = 0;
   for (let i = 0; i < gridPts.length; i++) {
     const g = gridPts[i];
     gridToWorld(g.x, g.z, pw);
     projectToContour(pw);
-    if (i > 0) u += Math.hypot(pw.x - px, pw.z - pz);
-    px = pw.x; pz = pw.z;
-    pts.push({ x: pw.x, z: pw.z, nx: pw.nx, nz: pw.nz, u });
+    raw.push({ x: pw.x, z: pw.z, nx: pw.nx, nz: pw.nz, u: 0 });
+  }
+  // the projection can pull neighbouring points past each other around the
+  // corner fillets (the strip then folds into serrated fins): keep only
+  // monotonically advancing points, then rebuild u as world arc length
+  const pts = [raw[0]];
+  for (let i = 1; i < raw.length; i++) {
+    const q = raw[i];
+    const l = pts[pts.length - 1];
+    const dx = q.x - l.x, dz = q.z - l.z;
+    const seg = Math.hypot(dx, dz);
+    if (seg < 0.05) continue;
+    if (pts.length > 1) {
+      const p2 = pts[pts.length - 2];
+      if ((l.x - p2.x) * dx + (l.z - p2.z) * dz < 0) continue;   // backtrack
+    }
+    pts.push(q);
+  }
+  let u = 0;
+  for (let i = 1; i < pts.length; i++) {
+    u += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+    pts[i].u = u;
+  }
+  // smooth the normals along the path: the numeric SDF gradients jitter a
+  // little under the curvature warp, and the 3 m outer station amplifies
+  // any angular noise into edge fringing at the corners
+  const np = pts.length;
+  for (let pass = 0; pass < 2; pass++) {
+    let prevNx = pts[np - 1].nx, prevNz = pts[np - 1].nz;
+    for (let i = 0; i < np; i++) {
+      const nxt = pts[(i + 1) % np];
+      const cur = pts[i];
+      const sx = prevNx * 0.25 + cur.nx * 0.5 + nxt.nx * 0.25;
+      const sz = prevNz * 0.25 + cur.nz * 0.5 + nxt.nz * 0.25;
+      const il = 1 / (Math.hypot(sx, sz) || 1);
+      prevNx = cur.nx; prevNz = cur.nz;
+      cur.nx = sx * il; cur.nz = sz * il;
+    }
   }
   return pts;
 }

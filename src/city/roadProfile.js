@@ -26,7 +26,10 @@ const FINE_FREQ = 0.42;
 const RUT_DEPTH = 0.007;             // wheel-track depressions
 const SIDEWALK_TILT = 0.014;         // rises away from curb
 export const MEDIAN_H = 0.13;        // motorway centre island height
-export const BLOCK_H = CURB_H + SIDEWALK_W * SIDEWALK_TILT + 0.02;
+// block plateau meets the sidewalk EXACTLY at d = 3 (no plinth step): a
+// height discontinuity there forced the band mesh to straddle the branch
+// with mm precision, which fringed under the street-curvature warp
+export const BLOCK_H = CURB_H + SIDEWALK_W * SIDEWALK_TILT;
 
 /** Gutter channel shape for the band [face-GUTTER_W, face]. */
 function gutterDip(at, face) {
@@ -90,17 +93,18 @@ export function groundHeight(x, z) {
     const atA = Math.abs(rs.tA), atB = Math.abs(rs.tB);
     const inA = atA < rs.faceA;
     const inB = atB < rs.faceB;
-    const hA = inA ? crossProfile(atA) - rutProfile(atA) * (1 - rs.wB) : -1;
-    let hB = -1;
-    if (inB) {
-      if (rs.mwayB) {
-        // island fades out across the junction (|tA| 0.6..2.6 beyond the face)
-        let g = (atA - rs.faceA - 0.6) / 2.0;
-        g = g < 0 ? 0 : g > 1 ? 1 : g;
-        hB = mwayProfile(atB, g * g * (3 - 2 * g));
-      } else {
-        hB = crossProfile(atB) - rutProfile(atB) * rs.wB;
-      }
+    // both profiles clamp internally, so they stay valid in the fillet
+    // corners where the point is on asphalt but outside BOTH street
+    // rectangles (a -1 sentinel here once punched 1 m pits into corners)
+    const hA = crossProfile(atA) - (inA ? rutProfile(atA) * (1 - rs.wB) : 0);
+    let hB;
+    if (rs.mwayB) {
+      // island fades out across the junction (|tA| 0.6..2.6 beyond the face)
+      let g = (atA - rs.faceA - 0.6) / 2.0;
+      g = g < 0 ? 0 : g > 1 ? 1 : g;
+      hB = mwayProfile(atB, g * g * (3 - 2 * g));
+    } else {
+      hB = crossProfile(atB) - (inB ? rutProfile(atB) * rs.wB : 0);
     }
     return (hA > hB ? hA : hB) + settle;
 
@@ -118,7 +122,8 @@ export function groundHeight(x, z) {
     return CURB_H + ds * SIDEWALK_TILT + wobbleAt(x, z) + settle * 0.35;
 
   } else {
-    return BLOCK_H + settle * 0.25;
+    // same tail terms as the sidewalk branch → exactly continuous at d = 3
+    return BLOCK_H + wobbleAt(x, z) + settle * 0.35;
   }
 }
 

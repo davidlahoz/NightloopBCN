@@ -31,7 +31,12 @@ import {
   CURB_FACE, CORNER_R, PERIOD_X, PERIOD_Z,
   rowFace, rowSwEdge, rowIsMotorway, segmentsInRegion, crossingsInRegion,
   blocksInRegion, cellSeed, SIDEWALK_EDGE, gridToWorld, streetYawDelta,
+  districtOf,
 } from './cityPlan.js';
+
+// per-district street furniture density: [downtown, commercial, residential, industrial]
+const BOLLARD_P = [0.42, 0.25, 0.12, 0.04];
+const DUMPSTER_P = [0.15, 0.30, 0.22, 0.55];
 import { groundHeight } from './roadProfile.js';
 import { hash2, fbm3, valueNoise } from './noise.js';
 
@@ -602,7 +607,9 @@ export class Props {
       for (let sx = -1; sx <= 1; sx += 2) {
         for (let sz = -1; sz <= 1; sz += 2) {
           const roll = cellSeed(cr.i * 2 + (sx > 0 ? 1 : 0), cr.j * 2 + (sz > 0 ? 1 : 0), 47);
-          if (roll > 0.25) continue;
+          // corner arcs are commonest downtown, rare in industrial blocks
+          const bp = BOLLARD_P[districtOf(cr.i + (sx > 0 ? 0 : -1), cr.j + (sz > 0 ? 0 : -1))];
+          if (roll > bp) continue;
           const acx = cr.x + sx * (CURB_FACE + CORNER_R);
           const acz = cr.z + sz * (rowFace(cr.j) + CORNER_R);
           const count = 5;
@@ -636,7 +643,7 @@ export class Props {
     const dumps = [];
     for (const bl of blocksInRegion(minX, maxX, minZ, maxZ)) {
       const roll = cellSeed(bl.ix, bl.jz, 59);
-      if (roll > 0.30) continue;
+      if (roll > DUMPSTER_P[districtOf(bl.ix, bl.jz)]) continue;
       const side = (cellSeed(bl.ix, bl.jz, 61) * 4) | 0;
       const f = 0.2 + cellSeed(bl.ix, bl.jz, 67) * 0.6;
       let x, z, yaw;

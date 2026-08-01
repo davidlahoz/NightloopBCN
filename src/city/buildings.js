@@ -22,7 +22,10 @@ import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
-import { PERIOD_X, PERIOD_Z, blocksInRegion, cellSeed, gridToWorld, streetYawDelta } from './cityPlan.js';
+import {
+  PERIOD_X, PERIOD_Z, blocksInRegion, cellSeed, gridToWorld, streetYawDelta,
+  districtOf, districtHeightBias,
+} from './cityPlan.js';
 import { groundHeight } from './roadProfile.js';
 import { buildBudget } from '../core/buildBudget.js';
 import facadeVertex from '../shaders/facade.vertex.wgsl?raw';
@@ -60,17 +63,26 @@ function mulberry32(a) {
 }
 
 /** Split an edge length into 1-4 frontage widths of pleasing variety. */
-function splitSpan(len, rng) {
-  let n = Math.round(len / (20 + rng() * 9));
+function splitSpan(len, rng, wide) {
+  let n = Math.round(len / (wide ? 30 + rng() * 14 : 20 + rng() * 9));
   if (n < 1) n = 1;
   if (n > 4) n = 4;
-  while (n > 1 && len / n < 9) n--;
+  while (n > 1 && len / n < (wide ? 14 : 9)) n--;
   const ws = [];
   let sum = 0;
   for (let i = 0; i < n; i++) { const w = 0.72 + rng() * 0.56; ws.push(w); sum += w; }
   for (let i = 0; i < n; i++) ws[i] = (ws[i] / sum) * len;
   return ws;
 }
+
+// per-district character — heights, façade style pool, sign density, vacant
+// lot chance, frontage width, wall tint (bits 8-9 of the facade flags)
+const DISTRICTS = [
+  { hLo: 24, hHi: 60, styles: [2, 4, 2, 3, 4], signs: 1.6, lot: 0.02, wide: 0, tint: 2 << 8, towers: 0.5 },  // downtown
+  { hLo: 13, hHi: 40, styles: [0, 1, 2, 3, 4, 5], signs: 1.0, lot: 0.05, wide: 0, tint: 0, towers: 0.35 },   // commercial
+  { hLo: 9, hHi: 21, styles: [0, 1, 5, 0, 5], signs: 0.35, lot: 0.07, wide: 0, tint: 1 << 8, towers: 0.10 }, // residential
+  { hLo: 7, hHi: 15, styles: [3, 5, 3, 1], signs: 0.15, lot: 0.14, wide: 1, tint: 3 << 8, towers: 0.06 },    // industrial
+];
 
 /**
  * Cooperative per-block build. Yields between buildings. Fills geo arrays and
@@ -79,7 +91,9 @@ function splitSpan(len, rng) {
 function* buildBlockGen(ix, jz, rect, geo, lights) {
   const { pos, nor, uvs, col, idx } = geo;
   const rng = mulberry32((cellSeed(ix, jz, 101) * 4294967296) | 0);
-  const hBias = cellSeed(ix, jz, 5);      // per-block district height 0..1
+  const district = districtOf(ix, jz);
+  const DIST = DISTRICTS[district];
+  const hBias = districtHeightBias(ix, jz);   // clusters tall cores at macro scale
   const corners = [
     [rect.x0, rect.z0], [rect.x1, rect.z0], [rect.x0, rect.z1], [rect.x1, rect.z1],
   ];
@@ -123,7 +137,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       px + ux + vx, py + uy + vy, pz + uz + vz,
       px + vx, py + vy, pz + vz,
     );
-    for (let k = 0; k < 4; k++) { nor.push(nx, ny, nz); col.push(seed, flags, w, top); }
+    for (let k = 0; k < 4; k++) { nor.push(nx, ny, nz); col.push(seed, flags + DIST.tint, w, top); }
     uvs.push(ua, va, ub, va, ub, vb, ua, vb);
     idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
   }
@@ -207,14 +221,14 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const bc = pos.length / 3;
     let fcx = cx, fcz = cz;
     if (xfOn) { const p = xfPoint(cx, cz); fcx = p.x; fcz = p.z; }
-    pos.push(fcx, y0 + h, fcz); nor.push(0, 1, 0); uvs.push(0, 5); col.push(seed, F_ROOF, r * 2, 1);
+    pos.push(fcx, y0 + h, fcz); nor.push(0, 1, 0); uvs.push(0, 5); col.push(seed, F_ROOF + DIST.tint, r * 2, 1);
     for (let k = 0; k < nS; k++) {
       const a = k * step;
       let vx0 = cx + Math.cos(a) * r, vz0 = cz + Math.sin(a) * r;
       if (xfOn) { const p = xfPoint(vx0, vz0); vx0 = p.x; vz0 = p.z; }
       pos.push(vx0, y0 + h, vz0);
       nor.push(0, 1, 0); uvs.push(Math.cos(a) * r, 5 + Math.sin(a) * r);
-      col.push(seed, F_ROOF, r * 2, 1);
+      col.push(seed, F_ROOF + DIST.tint, r * 2, 1);
     }
     for (let k = 0; k < nS; k++) idx.push(bc, bc + 1 + k, bc + 1 + ((k + 1) % nS));
   }
@@ -251,7 +265,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   // -- one street-wall building --------------------------------------------
   function addBuilding(o) {
     const seed = rng();
-    const style = Math.min(5, (rng() * 6) | 0);
+    const style = DIST.styles[(rng() * DIST.styles.length) | 0];
     const setback = rng() < 0.22 ? 0.5 + rng() * 1.5 : 0;
     const depth = 11 + rng() * 8;
     const gap = 0.03;
@@ -285,7 +299,8 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const vOff = groundHeight(wfx, wfz);
     const yBase = vOff - 0.9;
 
-    let h = 13 + hBias * 24 + rng() * (7 + hBias * 12);
+    const span = DIST.hHi - DIST.hLo;
+    let h = DIST.hLo + hBias * span * 0.65 + rng() * span * 0.35;
     if (h > 60) h = 60;
     let h1 = h;
     const hasUpper = h >= 22 && rng() < 0.45;
@@ -326,6 +341,49 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     return setback + depth + 0.15;
   }
 
+  // -- vacant lot: a fenced flat slab breaks the street wall ----------------
+  function emitLot(o) {
+    const seed = rng();
+    const depth = 11 + rng() * 5;
+    const gap = 0.03;
+    let bx0, bx1, bz0, bz1, frontPlane;
+    if (o.nx !== 0) {
+      frontPlane = o.plane;
+      if (o.nx < 0) { bx0 = frontPlane; bx1 = frontPlane + depth; }
+      else { bx1 = frontPlane; bx0 = frontPlane - depth; }
+      bz0 = o.a0 + gap; bz1 = o.a1 - gap;
+    } else {
+      frontPlane = o.plane;
+      if (o.nz < 0) { bz0 = frontPlane; bz1 = frontPlane + depth; }
+      else { bz1 = frontPlane; bz0 = frontPlane - depth; }
+      bx0 = o.a0 + gap; bx1 = o.a1 - gap;
+    }
+    const fx = o.nx !== 0 ? frontPlane : (bx0 + bx1) * 0.5;
+    const fz = o.nx !== 0 ? (bz0 + bz1) * 0.5 : frontPlane;
+    const line = o.nx !== 0 ? Math.round(o.plane / PERIOD_X) : Math.round(o.plane / PERIOD_Z);
+    const dyaw = o.nx !== 0 ? streetYawDelta(0, line, fz) : streetYawDelta(1, line, fx);
+    setXform(fx, fz, dyaw);
+    const wf = xfPoint(fx, fz);
+    const vOff = groundHeight(wf.x, wf.z);
+    // cracked asphalt slab (roof material reads as old blacktop)
+    upFace(bx0, bz0, bx1, bz1, vOff + 0.04, seed, F_ROOF);
+    // low perimeter wall, knee-high at the street, taller at the back
+    const wallFlags = 5 | F_TRIM;
+    const frontH = 0.5, backH = 1.1;
+    const sides = [
+      { axis: 0, plane: bx0, a0: bz0, a1: bz1, front: o.nx < 0 },
+      { axis: 0, plane: bx1, a0: bz0, a1: bz1, front: o.nx > 0 },
+      { axis: 1, plane: bz0, a0: bx0, a1: bx1, front: o.nz < 0 },
+      { axis: 1, plane: bz1, a0: bx0, a1: bx1, front: o.nz > 0 },
+    ];
+    for (const sd of sides) {
+      const hW = sd.front ? frontH : backH;
+      wallFace(sd.axis, 1, sd.plane, sd.a0, sd.a1, vOff, vOff + hW, seed, wallFlags, hW, vOff);
+      wallFace(sd.axis, -1, sd.plane, sd.a0, sd.a1, vOff, vOff + hW, seed, wallFlags, hW, vOff);
+    }
+    clearXform();
+  }
+
   // -- sparse back-row towers in the block interior -------------------------
   function backRow() {
     const fx0 = rect.x0 + 27, fx1 = rect.x1 - 27;
@@ -347,7 +405,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       placed.push({ x0: tx, z0: tz, x1: tx + tw, z1: tz + td });
       const seed = rng();
       const style = Math.min(5, (rng() * 6) | 0);
-      let h = 24 + hBias * 26 + rng() * 8;
+      let h = DIST.hLo + (DIST.hHi - DIST.hLo) * (0.7 + hBias * 0.5) + rng() * 8;
       if (h > 60) h = 60;
       setXform(tx + tw / 2, tz + td / 2, 0);   // interior towers: warp shift only
       const wc = xfPoint(tx + tw / 2, tz + td / 2);
@@ -373,16 +431,23 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   // N-S facing edges first — their corner buildings claim the corners
   for (const sgn of [-1, 1]) {
     const plane = sgn < 0 ? rect.x0 : rect.x1;
-    const ws = splitSpan(rect.z1 - rect.z0, rng);
+    const ws = splitSpan(rect.z1 - rect.z0, rng, DIST.wide);
     let a = rect.z0;
     for (let i = 0; i < ws.length; i++) {
-      const d = addBuilding({
+      const corner = i === 0 || i === ws.length - 1;
+      const o = {
         nx: sgn, nz: 0, plane, a0: a, a1: a + ws[i],
         frontLow: i === 0,
         frontHigh: i === ws.length - 1,
-      });
-      if (i === 0) { if (sgn < 0) ins.swx = d; else ins.sex = d; }
-      if (i === ws.length - 1) { if (sgn < 0) ins.nwx = d; else ins.nex = d; }
+      };
+      // mid-slot vacant lots break the street wall (corners stay built)
+      if (!corner && rng() < DIST.lot) {
+        emitLot(o);
+      } else {
+        const d = addBuilding(o);
+        if (i === 0) { if (sgn < 0) ins.swx = d; else ins.sex = d; }
+        if (i === ws.length - 1) { if (sgn < 0) ins.nwx = d; else ins.nex = d; }
+      }
       a += ws[i];
       yield;
     }
@@ -394,15 +459,17 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const insHigh = sgn < 0 ? ins.sex : ins.nex;
     const s0 = rect.x0 + insLow, s1 = rect.x1 - insHigh;
     if (s1 - s0 < 9) continue;
-    const ws = splitSpan(s1 - s0, rng);
+    const ws = splitSpan(s1 - s0, rng, DIST.wide);
     let a = s0;
     for (const w of ws) {
-      addBuilding({ nx: 0, nz: sgn, plane, a0: a, a1: a + w, frontLow: false, frontHigh: false });
+      const o = { nx: 0, nz: sgn, plane, a0: a, a1: a + w, frontLow: false, frontHigh: false };
+      if (rng() < DIST.lot) emitLot(o);
+      else addBuilding(o);
       a += w;
       yield;
     }
   }
-  if (cellSeed(ix, jz, 11) < 0.35) {
+  if (cellSeed(ix, jz, 11) < DIST.towers) {
     backRow();
     yield;
   }
@@ -414,7 +481,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   }
 
   const nSignsRoll = cellSeed(ix, jz, 9);
-  const nSigns = nSignsRoll < 0.45 ? 1 : nSignsRoll < 0.72 ? 2 : 0;
+  const nSigns = nSignsRoll < 0.45 * DIST.signs ? 1 : nSignsRoll < 0.72 * DIST.signs ? 2 : 0;
   const flick = cellSeed(ix, jz, 13) < 0.18;
   frontCands.sort((a, b) => a.dInt - b.dInt);
   const picked = [];
@@ -473,7 +540,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   }
 
   // -- rooftop sign frame on some blocks ------------------------------------
-  if (cellSeed(ix, jz, 17) < 0.18) {
+  if (cellSeed(ix, jz, 17) < 0.18 * DIST.signs) {
     const roofOk = roofCands.filter((c) => {
       const span = c.nx !== 0 ? c.z1 - c.z0 : c.x1 - c.x0;
       return span >= 8 && (c.nx !== 0 || c.nz !== 0);

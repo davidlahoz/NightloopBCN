@@ -52,6 +52,9 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let isRoof = (flags & 8u) != 0u;
   let isFront = (flags & 16u) != 0u;
   let isNeon = (flags & 32u) != 0u;
+  // district character (flag bits 8-9): 0 commercial, 1 residential warm
+  // brick, 2 downtown cool glass, 3 industrial drab
+  let dTint = (flags >> 8u) & 3u;
   let doFlicker = (flags & 64u) != 0u;
   let isTrim = (flags & 128u) != 0u;
 
@@ -145,6 +148,14 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     let pi0 = u32(seed * 5.999);
     let pi1 = (pi0 + 2u + (u32(seed * 97.0) % 3u)) % 6u;
     var wall = mix(wallPal[pi0], wallPal[pi1], fract(seed * 13.7) * 0.5);
+    // district palette shift
+    var dPal = array<vec3f, 4>(
+      vec3f(1.00, 1.00, 1.00),   // commercial: as authored
+      vec3f(1.14, 0.94, 0.82),   // residential: warm brick
+      vec3f(0.80, 0.86, 1.00),   // downtown: cool concrete/glass
+      vec3f(0.90, 0.89, 0.84),   // industrial: drab
+    );
+    wall = wall * dPal[dTint];
     // large-scale tone drift + fine material grain
     let tone = nlFbm3(vec2f(u * 0.045 + seed * 61.0, v * 0.045));
     wall = wall * (0.84 + 0.34 * tone);
@@ -201,8 +212,10 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
           let wid = vec2<i32>(i32(col) + iseed * 7, i32(row) + iseed * 13);
           let wr = nlHash2v(wid);
           let wr2 = nlHash2v(wid + vec2<i32>(517, 217));
-          // per-building occupancy clustering: some buildings glow, some sleep
-          let bldOcc = 0.35 + 1.15 * nlHash2(vec2<i32>(iseed, 4441));
+          // per-building occupancy clustering: some buildings glow, some sleep;
+          // districts modulate it (offices blaze, warehouses sleep)
+          var dLit = array<f32, 4>(1.0, 0.7, 1.35, 0.3);
+          let bldOcc = (0.35 + 1.15 * nlHash2(vec2<i32>(iseed, 4441))) * dLit[dTint];
           let lit = step(wr.x, uniforms.windowLitFraction * bldOcc);
           let gridFade = 1.0 - smoothstep(0.25, 0.70, aaU / cellW);
 
