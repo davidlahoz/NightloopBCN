@@ -103,7 +103,7 @@ async function main() {
   cityModules.push(skyline);
   const buildings = new Buildings(scene, env);
   cityModules.push(buildings);
-  const curbs = new Curbs(scene, env);
+  const curbs = new Curbs(scene, env, roadMat);
   cityModules.push(curbs);
 
   // populate the streamers around the spawn (behind the loading screen)

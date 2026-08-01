@@ -19,7 +19,16 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import '@babylonjs/core/Meshes/thinInstanceMesh.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
+import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { params } from '../core/params.js';
+import { quality } from '../core/quality.js';
+import groundBandVertex from '../shaders/groundBand.vertex.wgsl?raw';
+import groundBandFragment from '../shaders/groundBand.fragment.wgsl?raw';
+import commonWgsl from '../shaders/common.wgsl?raw';
 import {
   PERIOD_X, PERIOD_Z, CURB_FACE, CURB_W, CURB_H, CORNER_R,
   rowFace, blocksInRegion, segmentsInRegion, crossingsInRegion, cellSeed,
@@ -392,18 +401,29 @@ export class Curbs {
   /**
    * @param {import('@babylonjs/core').Scene} scene
    * @param {import('../weather/environment.js').Environment} env
+   * @param {import('./roadMaterial.js').RoadMaterial} roadMat street-light buffer owner
    */
-  constructor(scene, env) {
+  constructor(scene, env, roadMat) {
     this.scene = scene;
+    this._env = env;
+    this._roadMat = roadMat;
     /** bumped whenever meshes stream in/out (render-list refresh hook) */
     this.generation = 0;
 
-    this._matCurb = makePbrSet(scene, 'nlCurbConcrete', '/assets/textures/concrete/', 1 / 0.75, 0);
-    this._matWalk = makePbrSet(scene, 'nlSidewalkPaving', '/assets/textures/paving/', 1 / 2.7, 0);
+    // curb + sidewalk use the road-grade ground-band shader (street-light
+    // pools, shadowed sun, wet response, matching fog) so the quality never
+    // steps down at the asphalt's edge
+    if (!ShaderStore.IncludesShadersStoreWGSL['nlCommon']) {
+      ShaderStore.IncludesShadersStoreWGSL['nlCommon'] = commonWgsl;
+    }
+    ShaderStore.ShadersStoreWGSL['nlGroundBandVertexShader'] = groundBandVertex;
+    ShaderStore.ShadersStoreWGSL['nlGroundBandFragmentShader'] = groundBandFragment;
+    this._matWalk = this._makeBandMaterial('nlSidewalkPaving', '/assets/textures/paving/', 1 / 2.7, 0.95, 0.95, 0.94);
+    this._matCurb = this._makeBandMaterial('nlCurbConcrete', '/assets/textures/concrete/', 1 / 0.75, 0.84, 0.84, 0.83);
+
     // Moderate metallic: there is no IBL env texture, full metals would read black.
     this._matManhole = makePbrSet(scene, 'nlManholeSteel', '/assets/textures/metal/', 1 / 0.8, 0.45);
     this._matDrain = makePbrSet(scene, 'nlDrainIron', '/assets/textures/metal/', 1 / 0.4, 0.55);
-    this._matWalk.bumpTexture.level = 0.9;
 
     /** @type {Map<string, {mc: Mesh|null, mw: Mesh|null}>} */
     this._blocks = new Map();
@@ -430,6 +450,57 @@ export class Curbs {
     }
 
     if (env) this.applyEnvironment(env);
+  }
+
+  /** Road-grade band material: textures + shadow map + street-light buffer. */
+  _makeBandMaterial(name, folder, tile, tr, tg, tb) {
+    const scene = this.scene;
+    const m = new ShaderMaterial(name, scene, { vertex: 'nlGroundBand', fragment: 'nlGroundBand' }, {
+      attributes: ['position', 'normal', 'uv', 'color'],
+      uniformBuffers: ['Scene', 'Mesh'],
+      storageBuffers: ['roadLights'],
+      shaderLanguage: ShaderLanguage.WGSL,
+    });
+    const tex = (file) => {
+      const t = new Texture(folder + file, scene, false, true, Texture.TRILINEAR_SAMPLINGMODE);
+      t.wrapU = Texture.WRAP_ADDRESSMODE;
+      t.wrapV = Texture.WRAP_ADDRESSMODE;
+      t.anisotropicFilteringLevel = 8;
+      return t;
+    };
+    m.setTexture('albedoTex', tex('color.jpg'));
+    m.setTexture('normalTex', tex('normal.jpg'));
+    m.setTexture('roughTex', tex('roughness.jpg'));
+    m.setTexture('aoTex', tex('ao.jpg'));
+    m.setFloat('tile', tile);
+    // ShaderMaterial stores REFERENCES: dedicated objects per uniform
+    const u = {
+      tint: new Vector3(tr, tg, tb),
+      sunDir: new Vector3(0, -1, 0),
+      sunColor: new Vector3(1, 1, 1),
+      ambientSky: new Vector3(0.3, 0.35, 0.5),
+      ambientGround: new Vector3(0.15, 0.14, 0.13),
+      fogColor: new Vector3(0.2, 0.2, 0.25),
+      shadowDV: new Vector2(this._env.sun.shadowMinZ, this._env.sun.shadowMaxZ),
+    };
+    m._nl = u;
+    m.setVector3('albedoTint', u.tint);
+    m.setVector3('sunDir', u.sunDir);
+    m.setVector3('sunColor', u.sunColor);
+    m.setVector3('ambientSky', u.ambientSky);
+    m.setVector3('ambientGround', u.ambientGround);
+    m.setVector3('fogColor', u.fogColor);
+    m.setFloat('ambientIntensity', 0.85);
+    m.setFloat('fogDensity', 0.003);
+    m.setFloat('fogHeightFalloff', 0.05);
+    m.setFloat('wetness', 0.5);
+    m.setTexture('sunShadowMap', this._env.shadow.getShadowMap());
+    m.setFloat('shadowMapSize', quality.shadowSize);
+    m.setVector2('shadowDV', u.shadowDV);
+    m.setMatrix('sunShadowMatrix', this._env.shadow.getTransformMatrix());
+    m.setStorageBuffer('roadLights', this._roadMat.lightBuffer);
+    m.setFloat('lightCount', 0);
+    return m;
   }
 
   _rescan(cx, cz) {
@@ -531,6 +602,15 @@ export class Curbs {
 
   /** Per-frame streaming under the shared build budget. Allocation-light. */
   update(dt, camX, camZ) {
+    // live uniforms: follow-shadow matrix, road wetness, light-buffer count
+    const lc = this._roadMat.lightCount;
+    const sm = this._env.shadow.getTransformMatrix();
+    for (const m of [this._matWalk, this._matCurb]) {
+      m.setMatrix('sunShadowMatrix', sm);
+      m.setFloat('wetness', params.roadWetness);
+      m.setFloat('lightCount', lc);
+    }
+
     if (Math.hypot(camX - this._scanX, camZ - this._scanZ) > RESCAN_DIST) {
       this._rescan(camX, camZ);
     }
@@ -577,29 +657,34 @@ export class Curbs {
   }
 
   /**
-   * Weather push. Wetness darkens albedo and tightens roughness; the
-   * curb/gutter splash zone reacts strongest.
+   * Weather push. The band materials get the same environment uniforms as
+   * the road; manholes/drains stay simple PBR with a wet-tightened finish.
    */
   applyEnvironment(env) {
     const p = env.params;
+    const si = env.sun.intensity;
+    for (const m of [this._matWalk, this._matCurb]) {
+      const u = m._nl;
+      u.sunDir.copyFrom(env.sunDir);
+      u.sunColor.set(p.sunColor[0] * si, p.sunColor[1] * si, p.sunColor[2] * si);
+      u.ambientSky.set(p.ambientSky[0], p.ambientSky[1], p.ambientSky[2]);
+      u.ambientGround.set(p.ambientGround[0], p.ambientGround[1], p.ambientGround[2]);
+      u.fogColor.set(p.fogColor[0], p.fogColor[1], p.fogColor[2]);
+      m.setVector3('sunDir', u.sunDir);
+      m.setVector3('sunColor', u.sunColor);
+      m.setVector3('ambientSky', u.ambientSky);
+      m.setVector3('ambientGround', u.ambientGround);
+      m.setVector3('fogColor', u.fogColor);
+      m.setFloat('ambientIntensity', p.ambientIntensity);
+      m.setFloat('fogDensity', p.fogDensity);
+      m.setFloat('fogHeightFalloff', p.fogHeightFalloff);
+    }
+
     let w = p.wetnessTarget + p.rainRate * 0.25;
     if (w < 0) w = 0; else if (w > 1) w = 1;
-    // Night response: the pale paving scan reads far too bright under dark
-    // skies (the PBR band gets no streetlight point lights), so albedo tracks
-    // the ambient level — sidewalks sink into the dark instead of glowing.
     const amb = Math.min(1, Math.max(0, p.ambientIntensity));
     const dim = 0.32 + 0.68 * amb * amb;
-    const mw = this._matWalk, mc = this._matCurb, mm = this._matManhole, md = this._matDrain;
-    if (!mw.unlit) {
-      mw.roughness = 1 - 0.40 * w;
-      const s = (1 - 0.20 * w) * dim;
-      mw.albedoColor.copyFromFloats(0.94 * s, 0.94 * s, 0.93 * s);
-    }
-    if (!mc.unlit) {
-      mc.roughness = 1 - 0.52 * w;
-      const s = (1 - 0.30 * w) * dim;
-      mc.albedoColor.copyFromFloats(0.88 * s, 0.88 * s, 0.87 * s);
-    }
+    const mm = this._matManhole, md = this._matDrain;
     if (!mm.unlit) {
       mm.roughness = 1 - 0.55 * w;
       const s = (1 - 0.25 * w) * dim;
@@ -612,6 +697,13 @@ export class Curbs {
     }
   }
 
-  /** All pipeline variants are plain PBR; nothing extra to touch. */
-  warmup() { }
+  /** Touch the band pipelines once during load. */
+  warmup() {
+    for (const entry of this._blocks.values()) {
+      if (!entry) continue;
+      if (entry.mc) this._matCurb.forceCompilation(entry.mc);
+      if (entry.mw) this._matWalk.forceCompilation(entry.mw);
+      return;
+    }
+  }
 }
