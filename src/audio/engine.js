@@ -186,8 +186,12 @@ export class EngineAudio {
     const s = this._screech;
     this._sqPhase += dt * (11 + s * 9);
     this.squealBP.frequency.value = 1050 + s * 420 + Math.sin(this._sqPhase) * 90;
-    this.squealGain.gain.value = s * s * 0.42;
-    this.scrubGain.gain.value = s * 0.20;
+    // the screech tracks the volume slider harder than the engine bed (it
+    // already passes through master): turning the slider down tames the
+    // squeal first instead of keeping a piercing constant mix
+    const volFollow = Math.min(1, params.audioVolume * 2);
+    this.squealGain.gain.value = s * s * 0.5 * volFollow;
+    this.scrubGain.gain.value = s * 0.24 * volFollow;
 
     // click-free mute: master gain eases toward its target
     const masterTarget = this.muted ? 0 : params.audioVolume * 0.5;
