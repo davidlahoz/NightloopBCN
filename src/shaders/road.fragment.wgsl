@@ -296,6 +296,8 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     stateS = textureSample(stateTex, stateTexSampler, suv);
     let inState = step(abs(suv.x - 0.5), 0.49) * step(abs(suv.y - 0.5), 0.49);
     stateS = stateS * inState;
+    // NaN scrub — a poisoned texel must never black out the road
+    stateS = select(stateS, vec4f(0.0), stateS != stateS);
   }
   albedo = mix(albedo, albedo * vec3f(0.32, 0.32, 0.34), clamp(stateS.a, 0.0, 1.0));
 
@@ -454,6 +456,8 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
       var refl = textureSampleLevel(mirrorTex, mirrorTexSampler, ruv, lod).rgb;
       // slight vertical smear for the wet look
       refl = refl * 0.6 + textureSampleLevel(mirrorTex, mirrorTexSampler, ruv + vec2f(0.0, 0.018 * rough), lod + 1.2).rgb * 0.4;
+      // NaN/garbage scrub — a poisoned mirror mip must never black a puddle
+      refl = clamp(select(refl, vec3f(0.0), refl != refl), vec3f(0.0), vec3f(120.0));
       let w = fresnelV * smoothT * uniforms.reflStrength * (0.30 + 0.35 * wetF + 0.35 * waterMask);
       col = col + refl * w;
     }
@@ -543,7 +547,9 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let fogT = nlFogFactor(camPos, wp, uniforms.fogDensity, uniforms.fogHeightFalloff);
   col = mix(uniforms.fogColor, col, fogT);
 
-  // half-float safety: never emit Inf/NaN into the HDR chain
+  // half-float safety: never emit Inf/NaN into the HDR chain. Any pixel that
+  // still NaN'd upstream renders as fog instead of a black blob.
+  col = select(col, uniforms.fogColor, col != col);
   col = clamp(col, vec3f(0.0), vec3f(120.0));
   fragmentOutputs.color = vec4f(col, 1.0);
 }

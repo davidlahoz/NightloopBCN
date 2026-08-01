@@ -28,6 +28,9 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   // sample unconditionally (WGSL uniform control flow), mask out-of-range
   let inR = step(0.0, puv.x) * step(puv.x, 1.0) * step(0.0, puv.y) * step(puv.y, 1.0);
   var s = textureSample(prevState, prevStateSampler, clamp(puv, vec2f(0.0), vec2f(1.0))) * inR;
+  // self-heal: the buffer ping-pongs forever, so a NaN texel from any source
+  // would otherwise persist and smear along the drive as black road blobs
+  s = select(clamp(s, vec4f(0.0), vec4f(1.0)), vec4f(0.0), s != s);
 
   // ---- decay / recovery -------------------------------------------------
   let dtc = uniforms.dt;
