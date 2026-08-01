@@ -81,7 +81,19 @@ export class Car {
     this.materials = new CarMaterials(scene);
     this._tailMat = null;
     this.wheelRadius = WHEEL_R;
+    this._visible = true;
     this._build(scene);
+  }
+
+  /**
+   * Show/hide the whole car (body, wheels, AO blob). The bumper camera sits
+   * where the hood is, so first-person view hides the car entirely — robust
+   * for any model shape, and the mirror/shadow stay consistent.
+   */
+  setVisible(v) {
+    if (this._visible === v) return;
+    this._visible = v;
+    this.root.setEnabled(v);
   }
 
   /**

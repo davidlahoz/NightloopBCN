@@ -266,6 +266,9 @@ async function main() {
     car.update(dt, input, groundHeight);
     if (car.curbBump > 0) chase.shakeEnergy = Math.min(1, chase.shakeEnergy + car.curbBump);
     chase.update(dt, car, input, groundHeight);
+    // first-person (bumper) view: the camera sits where the hood is — hide
+    // the car so no body panels ever clip into frame
+    car.setVisible(chase.mode !== 1);
 
     // tyre contact patches write into the surface state buffer
     if (car.speed > 0.4) {
