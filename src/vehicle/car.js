@@ -82,6 +82,8 @@ export class Car {
     this._tailMat = null;
     this.wheelRadius = WHEEL_R;
     this._visible = true;
+    /** shared tyre-scrub intensity 0..1 — drives screech audio + drift smoke */
+    this.scrub = 0;
     this._build(scene);
   }
 
@@ -374,6 +376,11 @@ export class Car {
 
     this.speed = Math.hypot(this.vx, this.vz);
     this.slipYawOffset = this.speed > 2 ? Math.atan2(this.vx, Math.abs(this.vz)) : 0;
+    // tyre scrub: how hard the rubber is sliding (lateral scrub, drift state,
+    // locked handbrake). One signal for screech audio and drift smoke.
+    this.scrub = this.speed > 3
+      ? Math.min(1, Math.abs(this.vx) * 0.10 + this.driftAmount * 0.35 + (input.handbrake ? 0.45 : 0))
+      : 0;
     // forgiving: past ~30° of slip the rear catches — no surprise spins
     if (this.driftAmount > 0.2) {
       const overshoot = Math.abs(this.slipYawOffset) - 0.52;

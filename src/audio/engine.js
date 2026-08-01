@@ -171,15 +171,9 @@ export class EngineAudio {
     this.noiseGain.gain.value = (throttle * 0.015 + sp * 0.0007) * (0.5 + rpm);
     this.bandpass.frequency.value = 700 + rpm * 900;
 
-    // ---- tyre screech: lateral scrub, drift and the locked handbrake all
-    // squeal; damp streets squeal noticeably less than dry ones ----
-    let scrub = 0;
-    if (sp > 3) {
-      scrub = Math.abs(car.vx) * 0.10
-        + car.driftAmount * 0.35
-        + (input.handbrake ? 0.45 : 0);
-      scrub = Math.min(1, scrub) * (1 - params.roadWetness * 0.45);
-    }
+    // ---- tyre screech: driven by the car's shared scrub signal (also feeds
+    // the drift smoke); damp streets squeal noticeably less than dry ones ----
+    const scrub = car.scrub * (1 - params.roadWetness * 0.45);
     // fast attack, slower release — the squeal snaps in and trails off
     const sRate = scrub > this._screech ? 14 : 5;
     this._screech += (scrub - this._screech) * (1 - Math.exp(-sRate * dt));

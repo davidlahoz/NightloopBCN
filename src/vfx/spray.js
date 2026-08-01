@@ -81,7 +81,7 @@ export class TyreFX {
     }
 
     // drift smoke — one shared system at the rear axle midpoint
-    const smoke = new ParticleSystem('nlSmoke', 300, scene);
+    const smoke = new ParticleSystem('nlSmoke', 450, scene);
     smoke.particleTexture = puff;
     this._smokeEmitter = new Vector3(0, -10, 0);
     smoke.emitter = this._smokeEmitter;
@@ -138,12 +138,16 @@ export class TyreFX {
       ps.direction2 = this._dir2[i];
     }
 
-    // smoke: dry-ish drift only
+    // smoke: whenever the tyres screech (car.scrub — same signal as the
+    // audio). Dry asphalt smokes hardest, but a screeching slide on the damp
+    // night street still burns some rubber off.
     const se = this._smokeEmitter;
     se.x = car.position.x - sy * 1.31;
     se.y = car.position.y + 0.15;
     se.z = car.position.z - cy * 1.31;
     const dry = 1 - Math.min(1, wetness * 1.6);
-    this.smoke.emitRate = car.driftAmount > 0.25 && sp > 8 ? car.driftAmount * dry * sp * 6 : 0;
+    this.smoke.emitRate = car.scrub > 0.22 && sp > 6
+      ? car.scrub * sp * 7 * (0.35 + 0.65 * dry)
+      : 0;
   }
 }
