@@ -31,6 +31,8 @@ import { Litter } from './vfx/litter.js';
 import { HeadlightCones } from './vfx/headlightCones.js';
 import { EngineAudio } from './audio/engine.js';
 import { Speedo } from './ui/speedo.js';
+import { isMobile } from './core/mobile.js';
+import { TouchControls } from './ui/touch.js';
 import commonWgsl from './shaders/common.wgsl?raw';
 
 const canvas = document.getElementById('canvas');
@@ -162,6 +164,12 @@ async function main() {
   // procedural engine sound (starts on first input — autoplay policy)
   const engineAudio = new EngineAudio();
   const speedo = new Speedo();
+
+  // phones/tablets get the translucent Game-Boy overlay instead of keys;
+  // it drives the same Input state, so everything downstream is untouched
+  if (isMobile) {
+    new TouchControls(input, { onMute: () => { engineAudio.muted = !engineAudio.muted; } });
+  }
 
   // weather/mood states (keys 1–5) — drives env params + physical wet lag
   const weather = new WeatherSystem(env, [...cityModules, roadMat], post, refreshRoadLights);

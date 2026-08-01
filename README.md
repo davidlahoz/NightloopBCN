@@ -64,7 +64,14 @@ drivable bumps, not walls — the hard stops are building faces and the
 motorway median barriers.
 
 Quality presets (low / medium / high) live in the overlay; medium is the
-default. `?q=high` / `?q=low` and `?state=N` work as URL parameters.
+default (phones default to low). `?q=high` / `?q=low` and `?state=N` work
+as URL parameters.
+
+**Mobile:** phones and tablets get a translucent Game-Boy-style touch
+overlay instead of the keyboard — D-pad to drive (diagonals steer), `A`
+holds the Glide drift, `B` is the handbrake, with small CAM / TIME / MUTE
+keys up top. Desktop never shows it (`?touch=1` forces it for testing).
+Requires a WebGPU-capable mobile browser.
 
 See `DECISIONS.md` for engineering choices, `PERF.md` for frame-budget
 measurements, `ASSETS.md` for vendored assets. Milestone screenshots are

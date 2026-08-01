@@ -53,6 +53,10 @@ function detect() {
     const stored = localStorage.getItem('nl-quality');
     if (stored && PRESETS[stored]) return stored;
   } catch { /* ignore */ }
+  // phones/tablets default to low: mobile GPUs and thermal budgets
+  try {
+    if (matchMedia('(pointer: coarse)').matches && navigator.maxTouchPoints > 0) return 'low';
+  } catch { /* ignore */ }
   return 'medium';
 }
 

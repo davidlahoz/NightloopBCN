@@ -35,6 +35,8 @@ export class EngineAudio {
       if (e.code === 'KeyM' && !e.repeat) this.muted = !this.muted;
     }, { passive: true });
     window.addEventListener('mousedown', start, { passive: true });
+    window.addEventListener('touchstart', start, { passive: true });   // mobile gesture unlock
+    window.addEventListener('pointerdown', start, { passive: true });
   }
 
   _init() {
