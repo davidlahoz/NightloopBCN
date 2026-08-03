@@ -17,6 +17,8 @@ export class Input {
     this.lmb = false;
     /** Last pressed time-of-day key 1..3, or 0. Consumed by weather system. */
     this.moodKey = 0;
+    /** Last pressed district-jump key 6..9, or 0. Consumed by main. */
+    this.jumpKey = 0;
     /** One-shot flags, consumed each frame. */
     this.toggleCamera = false;
 
@@ -26,6 +28,7 @@ export class Input {
       if (e.code.startsWith('Digit')) {
         const n = e.code.charCodeAt(5) - 48;
         if (n >= 1 && n <= 3) this.moodKey = n;
+        if (n >= 6 && n <= 9) this.jumpKey = n;
       }
       if (e.code === 'KeyC') this.toggleCamera = true;
       if (e.code === 'Space') e.preventDefault();   // handbrake, not page scroll
@@ -75,6 +78,7 @@ export class Input {
   /** Consume one-shot state at end of frame. */
   endFrame() {
     this.moodKey = 0;
+    this.jumpKey = 0;
     this.toggleCamera = false;
   }
 

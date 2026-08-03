@@ -27,6 +27,8 @@ import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { groundHeight } from './roadProfile.js';
+import { PERIOD_X, PERIOD_Z, districtOf, DISTRICT_COUNTRYSIDE } from './cityPlan.js';
+import { WORLD_SEED } from '../core/worldSeed.js';
 import skylineVertex from '../shaders/skyline.vertex.wgsl?raw';
 import skylineFragment from '../shaders/skyline.fragment.wgsl?raw';
 
@@ -65,6 +67,11 @@ const SEED = 0x51ca7e;
 const MAX_ANTENNAS = 15;
 const BEACON_COUNT = 3;
 
+/** World cell district at an absolute position (impostors respect the map). */
+function districtAtWorld(wx, wz) {
+  return districtOf(Math.floor(wx / PERIOD_X), Math.floor(wz / PERIOD_Z));
+}
+
 function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
@@ -74,8 +81,15 @@ function mulberry32(a) {
   };
 }
 
-/** Builds the whole skyline as a single VertexData. Construction-time only. */
-function buildGeometry() {
+/**
+ * Builds the whole skyline as a single VertexData, positions RELATIVE to the
+ * snap origin (originX, originZ). Towers/ribbon panels whose WORLD position
+ * lands in a countryside macro cell are skipped, so open fields stay open to
+ * the horizon instead of being walled off by impostors. Rebuilt per follow
+ * snap (~80 m of travel; a few ms). Three independent rng streams keep each
+ * section deterministic regardless of what the gating drops.
+ */
+function buildGeometry(originX, originZ) {
   const pos = [], nrm = [], uv = [], uv2 = [], uv3 = [], col = [], idx = [];
 
   // a = bottom-left, b = bottom-right, c = top-right, d = top-left (per-corner uvs
@@ -110,7 +124,7 @@ function buildGeometry() {
       -1, 0, 0, 0, v0, wz, v0, wz, v1, 0, v1, seed, totH, wz, ring, lit, warm, 0, crown);
   }
 
-  const rng = mulberry32(SEED);
+  const rng = mulberry32(SEED ^ (WORLD_SEED | 0));
   const towers = [];
 
   // ---- tower rings ----
@@ -135,6 +149,9 @@ function buildGeometry() {
       }
       const y0 = groundHeight(cx, cz) - 2.5; // sunk below any local ground
       const top = y0 + h;
+      // no impostor towers over open country (all rng draws stay unconditional
+      // so the sequence — and thus every other tower — is snap-invariant)
+      const keep = districtAtWorld(originX + cx, originZ + cz) !== DISTRICT_COUNTRYSIDE;
 
       if (rng() < R.tier) {
         // two-tier setback silhouette
@@ -143,10 +160,12 @@ function buildGeometry() {
         const w2z = wz * (0.55 + 0.22 * rng());
         const cx2 = cx + (rng() - 0.5) * (wx - w2x) * 0.6;
         const cz2 = cz + (rng() - 0.5) * (wz - w2z) * 0.6;
-        box(cx, cz, y0, y0 + h1, wx, wz, y0, seed, h, ri, lit, warm, 0);
-        box(cx2, cz2, y0 + h1 - 0.5, top, w2x, w2z, y0, seed, h, ri, lit, warm, crown);
-        towers.push({ cx: cx2, cz: cz2, top, w: Math.min(w2x, w2z), ring: ri, seed });
-      } else {
+        if (keep) {
+          box(cx, cz, y0, y0 + h1, wx, wz, y0, seed, h, ri, lit, warm, 0);
+          box(cx2, cz2, y0 + h1 - 0.5, top, w2x, w2z, y0, seed, h, ri, lit, warm, crown);
+          towers.push({ cx: cx2, cz: cz2, top, w: Math.min(w2x, w2z), ring: ri, seed });
+        }
+      } else if (keep) {
         box(cx, cz, y0, top, wx, wz, y0, seed, h, ri, lit, warm, crown);
         towers.push({ cx, cz, top, w: Math.min(wx, wz), ring: ri, seed });
       }
@@ -154,20 +173,22 @@ function buildGeometry() {
   }
 
   // ---- antenna spikes + aviation beacons (crossed thin quads, kind 3) ----
+  // own rng stream: the pick count depends on which towers survived gating
+  const rngA = mulberry32((SEED ^ (WORLD_SEED | 0)) + 0x9e3779b9);
   const byTop = towers.slice().sort((a, b) => b.top - a.top);
   const picks = [];
   for (let i = 0; i < byTop.length; i++) {
     const t = byTop[i];
     if (i < BEACON_COUNT) picks.push({ t, beacon: 1 });
-    else if (t.ring < 2 && t.top > 90 && picks.length < MAX_ANTENNAS && rng() < 0.14) {
+    else if (t.ring < 2 && t.top > 90 && picks.length < MAX_ANTENNAS && rngA() < 0.14) {
       picks.push({ t, beacon: 0 });
     }
   }
   for (let i = 0; i < picks.length; i++) {
     const { t, beacon } = picks[i];
-    const aH = 7 + rng() * 11;
-    const ax = t.cx + (rng() - 0.5) * t.w * 0.5;
-    const az = t.cz + (rng() - 0.5) * t.w * 0.5;
+    const aH = 7 + rngA() * 11;
+    const ax = t.cx + (rngA() - 0.5) * t.w * 0.5;
+    const az = t.cz + (rngA() - 0.5) * t.w * 0.5;
     const y0 = t.top - 0.5, y1 = t.top + aH;
     const totH = aH + 0.5, hw = 0.35;
     quad(ax - hw, y0, az, ax + hw, y0, az, ax + hw, y1, az, ax - hw, y1, az,
@@ -179,6 +200,7 @@ function buildGeometry() {
   }
 
   // ---- city floor ribbons: closed low walls, watertight, bumpy rooflines ----
+  const rngR = mulberry32((SEED ^ (WORLD_SEED | 0)) + 0x85ebca6b);
   for (let fi = 0; fi < FLOORS.length; fi++) {
     const F = FLOORS[fi];
     const n = F.n;
@@ -187,10 +209,10 @@ function buildGeometry() {
     const ph = new Float64Array(n + 1);
     for (let k = 0; k < n; k++) {
       const ang = (k / n) * Math.PI * 2;
-      const rad = F.r * (1 + (rng() - 0.5) * F.jit);
+      const rad = F.r * (1 + (rngR() - 0.5) * F.jit);
       px[k] = ringX(ang, rad);
       pz[k] = ringZ(ang, rad);
-      ph[k] = F.hMin + (F.hMax - F.hMin) * rng();
+      ph[k] = F.hMin + (F.hMax - F.hMin) * rngR();
     }
     px[n] = px[0]; pz[n] = pz[0]; ph[n] = ph[0];
     let uAcc = 0;
@@ -200,12 +222,17 @@ function buildGeometry() {
       const len = Math.hypot(dx, dz);
       const nx = dz / len, nz = -dx / len; // outward for CCW loop
       const y0 = -3, h0 = ph[k], h1 = ph[k + 1];
-      const seed = rng();
+      const seed = rngR();
+      const litJ = F.lit * (0.4 + 1.2 * rngR());
+      const warmJ = 0.5 + 0.4 * rngR();
       const totH = (h0 + h1) * 0.5 + 3;
-      quad(x0, y0, z0, x1, y0, z1, x1, h1, z1, x0, h0, z0,
-        nx, 0, nz,
-        uAcc, 0, uAcc + len, 0, uAcc + len, h1 - y0, uAcc, h0 - y0,
-        seed, totH, len, 3, F.lit * (0.4 + 1.2 * rng()), 0.5 + 0.4 * rng(), 0, 0);
+      // no low-rise wall across open country (draws above stay unconditional)
+      if (districtAtWorld(originX + (x0 + x1) * 0.5, originZ + (z0 + z1) * 0.5) !== DISTRICT_COUNTRYSIDE) {
+        quad(x0, y0, z0, x1, y0, z1, x1, h1, z1, x0, h0, z0,
+          nx, 0, nz,
+          uAcc, 0, uAcc + len, 0, uAcc + len, h1 - y0, uAcc, h0 - y0,
+          seed, totH, len, 3, litJ, warmJ, 0, 0);
+      }
       uAcc += len;
     }
   }
@@ -242,7 +269,7 @@ export class Skyline {
     this.material.backFaceCulling = false;
 
     this.mesh = new Mesh('nlSkyline', scene);
-    buildGeometry().applyToMesh(this.mesh, false);
+    buildGeometry(0, 0).applyToMesh(this.mesh, true);
     this.mesh.material = this.material;
     this.mesh.isPickable = false;
     this.mesh.alwaysSelectAsActiveMesh = true; // ring surrounds the player; skip culling
@@ -303,7 +330,8 @@ export class Skyline {
     m.setFloat('exposure', p.exposure);
   }
 
-  /** Per-frame: beacon blink + coarse-snap ring follow. Allocation-free. */
+  /** Per-frame: beacon blink + coarse-snap ring follow (rebuilds the gated
+   *  geometry per snap so impostors respect the districts under them). */
   update(dt, camX, camZ) {
     this._time += dt;
     this.material.setFloat('time', this._time);
@@ -314,6 +342,7 @@ export class Skyline {
       this.mesh.position.set(sx, 0, sz);
       this.mesh.computeWorldMatrix(true);
       this.mesh.freezeWorldMatrix();
+      buildGeometry(sx, sz).applyToMesh(this.mesh, true);
     }
   }
 

@@ -15,6 +15,10 @@ import { PostChain } from './post/postChain.js';
 import { RoadMaterial } from './city/roadMaterial.js';
 import { RoadChunks } from './city/roadChunks.js';
 import { groundHeight } from './city/roadProfile.js';
+import {
+  PERIOD_X, PERIOD_Z, districtOf, gridToWorld, streetYawDelta,
+  DISTRICT_DOWNTOWN, DISTRICT_RESIDENTIAL, DISTRICT_INDUSTRIAL, DISTRICT_COUNTRYSIDE,
+} from './city/cityPlan.js';
 import { params, defineParam, onParam } from './core/params.js';
 import { quality, setQualityAndReload } from './core/quality.js';
 import { buildBudget } from './core/buildBudget.js';
@@ -259,6 +263,47 @@ async function main() {
   // ---- main loop ----
   let lastT = performance.now();
   const MAX_STEP = 1 / 30;
+  // ---- district jump (keys 6-9): teleport onto a street in the nearest
+  // macro cell of the target district; heavy streamers prewarm synchronously
+  // (short hitch) so the destination is solid, roads stream in nearest-first
+  const JUMP_DISTRICTS = { 6: DISTRICT_DOWNTOWN, 7: DISTRICT_RESIDENTIAL, 8: DISTRICT_INDUSTRIAL, 9: DISTRICT_COUNTRYSIDE };
+  const _jgw = { x: 0, z: 0 };
+  function jumpToDistrict(key) {
+    const target = JUMP_DISTRICTS[key];
+    if (target === undefined) return;
+    const cmi = Math.floor(car.position.x / (PERIOD_X * 3));
+    const cmj = Math.floor(car.position.z / (PERIOD_Z * 3));
+    let best = null;
+    for (let r = 1; r <= 24 && !best; r++) {
+      for (let mi = cmi - r; mi <= cmi + r && !best; mi++) {
+        for (let mj = cmj - r; mj <= cmj + r && !best; mj++) {
+          if (Math.max(Math.abs(mi - cmi), Math.abs(mj - cmj)) !== r) continue;
+          if (districtOf(mi * 3 + 1, mj * 3 + 1) === target) best = { mi, mj };
+        }
+      }
+    }
+    if (!best) return;
+    const ix = best.mi * 3 + 1, jz = best.mj * 3 + 1;
+    const gx = (ix + 0.5) * PERIOD_X;
+    gridToWorld(gx, jz * PERIOD_Z - 2.2, _jgw);
+    car.position.x = _jgw.x;
+    car.position.z = _jgw.z;
+    car.yaw = Math.PI / 2 + streetYawDelta(1, jz, gx);
+    car.vx = 0; car.vz = 0; car.yawRate = 0;
+    if ('driftAmount' in car) car.driftAmount = 0;
+    // snap the chase camera behind the car so it doesn't fly across the map
+    chase._followYaw = car.yaw;
+    chase.cam.position.set(
+      _jgw.x - Math.sin(car.yaw) * 7,
+      car.position.y + 3,
+      _jgw.z - Math.cos(car.yaw) * 7,
+    );
+    // solid ground on arrival: prewarm the slow streamers (roads follow fast)
+    props.prewarm(_jgw.x, _jgw.z);
+    buildings.prewarm(_jgw.x, _jgw.z);
+    curbs.prewarm(_jgw.x, _jgw.z);
+  }
+
   let lastStreamGen = -1;
   engine.runRenderLoop(() => {
     const now = performance.now();
@@ -274,6 +319,7 @@ async function main() {
       input.rmb = true;
       input.mouseDX += NL.debugGlide;
     }
+    if (input.jumpKey) jumpToDistrict(input.jumpKey);
     car.update(dt, input, groundHeight);
     if (car.curbBump > 0) chase.shakeEnergy = Math.min(1, chase.shakeEnergy + car.curbBump);
     chase.update(dt, car, input, groundHeight);

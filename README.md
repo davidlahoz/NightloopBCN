@@ -64,6 +64,7 @@ npm run dev        # http://localhost:5174  (Chrome desktop, WebGPU required)
 | `C` | chase ↔ bumper camera |
 | `M` | mute / unmute engine sound |
 | `1–3` | time of day: Day · Afternoon · Night |
+| `6–9` | jump to an area: Downtown · Residential · Industrial · Countryside |
 | `0` / `` ` `` / `F1` | settings + performance overlay |
 
 Time-of-day transitions blend over ~4 s — the sun travels, the lights come

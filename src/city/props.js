@@ -806,23 +806,43 @@ export class Props {
     }
     setInstances(this._dumpsters, dumps, -0.025);
 
-    // ---- trees: scattered across countryside meadows, size-varied
+    // ---- trees: countryside meadows (scatter) + verge lines along the roads
     const trees = [];
+    const tree = (gx, gz, h1, h2) => {
+      gridToWorld(gx, gz, _gw);
+      trees.push({
+        x: _gw.x, z: _gw.z,
+        yaw: (h1 * 251) % (Math.PI * 2),
+        s: 0.75 + h2 * 0.65,
+      });
+    };
     for (const bl of blocksInRegion(minX, maxX, minZ, maxZ)) {
       if (districtOf(bl.ix, bl.jz) !== COUNTRY) continue;
-      const n = (12 + ((cellSeed(bl.ix, bl.jz, 71) * 6) | 0)) * (bl.ixEnd - bl.ix + 1);
+      const span = bl.ixEnd - bl.ix + 1;
+      const n = (18 + ((cellSeed(bl.ix, bl.jz, 71) * 9) | 0)) * span;
       for (let k = 0; k < n; k++) {
         const hx = cellSeed(bl.ix, bl.jz, 300 + k);
-        const hz = cellSeed(bl.ix, bl.jz, 360 + k);
-        const gx = bl.x0 + 7 + (bl.x1 - bl.x0 - 14) * hx;
-        const gz = bl.z0 + 7 + (bl.z1 - bl.z0 - 14) * hz;
-        gridToWorld(gx, gz, _gw);
-        trees.push({
-          x: _gw.x, z: _gw.z,
-          yaw: (hx * 251) % (Math.PI * 2),
-          s: 0.75 + hz * 0.65,
-        });
+        const hz = cellSeed(bl.ix, bl.jz, 700 + k);
+        tree(bl.x0 + 7 + (bl.x1 - bl.x0 - 14) * hx,
+             bl.z0 + 7 + (bl.z1 - bl.z0 - 14) * hz, hx, hz);
       }
+      // hedgerow lines just inside the verges — the rural road reads rural
+      const edge = (ex0, ez0, ex1, ez1, eid) => {
+        const len = Math.hypot(ex1 - ex0, ez1 - ez0);
+        const nS = Math.max(2, Math.round(len / 23));
+        for (let k = 0; k < nS; k++) {
+          const r1 = cellSeed(bl.ix * 4 + eid, bl.jz * 8 + k, 91);
+          if (r1 > 0.62) continue;
+          const r2 = cellSeed(bl.ix * 4 + eid, bl.jz * 8 + k, 97);
+          const f = (k + 0.2 + r1 * 0.6) / nS;
+          tree(ex0 + (ex1 - ex0) * f + (r2 - 0.5) * 2.5,
+               ez0 + (ez1 - ez0) * f + (r1 - 0.5) * 2.5, r2, r1);
+        }
+      };
+      edge(bl.x0 + 5, bl.z0 + 3.5, bl.x1 - 5, bl.z0 + 3.5, 0);   // south verge
+      edge(bl.x0 + 5, bl.z1 - 3.5, bl.x1 - 5, bl.z1 - 3.5, 1);   // north verge
+      edge(bl.x0 + 3.5, bl.z0 + 8, bl.x0 + 3.5, bl.z1 - 8, 2);   // west verge
+      edge(bl.x1 - 3.5, bl.z0 + 8, bl.x1 - 3.5, bl.z1 - 8, 3);   // east verge
     }
     setInstancesScaled(this._treeTrunks, trees, -0.06);
     setInstancesScaled(this._treeCanopy, trees, -0.06);
