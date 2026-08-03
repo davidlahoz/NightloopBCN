@@ -25,6 +25,7 @@ uniform lightCount : f32;
 uniform sunShadowMatrix : mat4x4<f32>;
 uniform shadowMapSize : f32;
 uniform shadowDV : vec2f;
+uniform grassMode : f32;             // 1 = countryside verge: procedural grass
 
 var albedoTex : texture_2d<f32>;
 var albedoTexSampler : sampler;
@@ -66,9 +67,28 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     N = normalize(N + vec3f(tn.x, 0.0, tn.y) * (0.55 * detailFade));
   }
 
+  // ---- countryside grass: procedural over the same geometry/lighting ----
+  if (uniforms.grassMode > 0.5) {
+    let meadow = nlFbm3(wp.xz * 0.043 + vec2f(11.3, 4.9));         // meadow patches
+    // high-frequency terms fade with distance or they alias into a weave
+    let gFade = 1.0 - smoothstep(16.0, 70.0, dist);
+    let tuft = mix(0.5, nlValueNoise(wp.xz * 1.9 + vec2f(2.2, 7.8)), gFade);
+    let blade = mix(0.5, nlValueNoise(wp.xz * vec2f(9.0, 31.0)), gFade);
+    var grass = mix(vec3f(0.045, 0.075, 0.022), vec3f(0.115, 0.135, 0.038), meadow);
+    grass = mix(grass, vec3f(0.140, 0.118, 0.050), smoothstep(0.62, 0.9, tuft) * 0.55); // dry stalks
+    grass = grass * (0.72 + 0.42 * blade) * (0.8 + 0.4 * ao);
+    // gentle earthy shift from the baked grime — smooth, no hard threshold
+    // (a steep cutoff here turns per-vertex noise into sawtooth dirt triangles)
+    let earth = clamp(1.0 - fragmentInputs.vGrime.r, 0.0, 1.0);
+    grass = mix(grass, grass * vec3f(1.25, 0.98, 0.72), earth * 0.5);
+    albedo = grass * (0.74 + tone * 0.48);
+  }
+
   // ---- roughness + wet response ----
   var rough = clamp(0.55 + textureSample(roughTex, roughTexSampler, uv1).r * 0.45, 0.0, 1.0);
-  let wetF = smoothstep(0.05, 0.8, uniforms.wetness) * (0.5 + 0.5 * fragmentInputs.vGrime.r);
+  rough = mix(rough, 0.94, uniforms.grassMode);   // grass never gets glossy
+  let wetF = smoothstep(0.05, 0.8, uniforms.wetness) * (0.5 + 0.5 * fragmentInputs.vGrime.r)
+           * (1.0 - uniforms.grassMode * 0.65);   // sod drains; no mirror sheen
   // paving joints hold water: low grime (joints/gutter) darkens harder
   albedo = albedo * mix(1.0, 0.52, wetF);
   rough = mix(rough, 0.16, wetF * 0.8);

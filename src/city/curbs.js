@@ -32,7 +32,7 @@ import commonWgsl from '../shaders/common.wgsl?raw';
 import {
   PERIOD_X, PERIOD_Z, CURB_FACE, CURB_W, CURB_H, CORNER_R,
   rowFace, blocksInRegion, segmentsInRegion, crossingsInRegion, cellSeed,
-  gridToWorld, sampleRoadSpace,
+  gridToWorld, sampleRoadSpace, districtOf, DISTRICT_COUNTRYSIDE,
 } from './cityPlan.js';
 import { groundHeight, groundNormal, crossProfile } from './roadProfile.js';
 import { valueNoise, hash2 } from './noise.js';
@@ -296,7 +296,7 @@ function emitRowsRange(b, stripBase, pts, from, to, stations, isCurb) {
 }
 
 /** Cooperative block-band build: yields between row slices. */
-function* blockBandGen(qc, qw, ix, jz) {
+function* blockBandGen(qc, qw, ix, jz, country) {
   const pts = buildBlockLoop(ix, jz);
   const baseC = qc.vcount();
   const baseW = qw.vcount();
@@ -307,6 +307,41 @@ function* blockBandGen(qc, qw, ix, jz) {
     emitRowsRange(qw, baseW, pts, i, end, WALK_STATIONS, false);
     i = end;
     yield;
+  }
+  if (country) yield* fieldGen(qw, ix, jz);
+}
+
+/**
+ * Countryside interior: a coarse grid meadow filling the block beyond the
+ * verge band. Grid-space rect inset by CURB_FACE+2.85 maps through the warp
+ * to a curve just inside the band's d=3 edge; sitting 4 mm below the band
+ * hides the overlap seam (grass-on-grass, band renders on top).
+ */
+function* fieldGen(qw, ix, jz) {
+  const fC = CURB_FACE, inset = 2.85, sink = 0.004;
+  const x0 = ix * PERIOD_X + fC + inset, x1 = (ix + 1) * PERIOD_X - fC - inset;
+  const z0 = jz * PERIOD_Z + rowFace(jz) + inset;
+  const z1 = (jz + 1) * PERIOD_Z - rowFace(jz + 1) - inset;
+  const nx = Math.max(2, Math.ceil((x1 - x0) / 9));
+  const nz = Math.max(2, Math.ceil((z1 - z0) / 9));
+  const base = qw.vcount();
+  for (let iz = 0; iz <= nz; iz++) {
+    for (let jx = 0; jx <= nx; jx++) {
+      const gx = x0 + (x1 - x0) * (jx / nx);
+      const gz = z0 + (z1 - z0) * (iz / nz);
+      gridToWorld(gx, gz, _gw);
+      const y = groundHeight(_gw.x, _gw.z) - sink;
+      groundNormal(_gw.x, _gw.z, 0.3, _gn);
+      const g = grimeAt(_gw.x, _gw.z, 3, false);
+      qw.vert(_gw.x, y, _gw.z, _gn.x, _gn.y, _gn.z, _gw.x, _gw.z, g, g * 0.985, g * 0.955);
+    }
+    if ((iz & 3) === 3) yield;
+  }
+  for (let iz = 0; iz < nz; iz++) {
+    for (let jx = 0; jx < nx; jx++) {
+      const a = base + iz * (nx + 1) + jx;
+      qw.quad(a, a + 1, a + nx + 2, a + nx + 1);
+    }
   }
 }
 
@@ -497,6 +532,9 @@ export class Curbs {
     ShaderStore.ShadersStoreWGSL['nlGroundBandFragmentShader'] = groundBandFragment;
     this._matWalk = this._makeBandMaterial('nlSidewalkPaving', '/assets/textures/paving/', 1 / 2.7, 0.95, 0.95, 0.94);
     this._matCurb = this._makeBandMaterial('nlCurbConcrete', '/assets/textures/concrete/', 1 / 0.75, 0.84, 0.84, 0.83);
+    // countryside verge/meadow: same band shader, procedural grass albedo
+    this._matGrass = this._makeBandMaterial('nlVergeGrass', '/assets/textures/paving/', 1 / 2.7, 1, 1, 1);
+    this._matGrass.setFloat('grassMode', 1);
 
     // Moderate metallic: there is no IBL env texture, full metals would read black.
     this._matManhole = makePbrSet(scene, 'nlManholeSteel', '/assets/textures/metal/', 1 / 0.8, 0.45);
@@ -577,6 +615,7 @@ export class Curbs {
     m.setMatrix('sunShadowMatrix', this._env.shadow.getTransformMatrix());
     m.setStorageBuffer('roadLights', this._roadMat.lightBuffer);
     m.setFloat('lightCount', 0);
+    m.setFloat('grassMode', 0);
     return m;
   }
 
@@ -591,7 +630,10 @@ export class Curbs {
       const dz = Math.max(0, Math.abs(cz - bcz) - hz);
       if (Math.hypot(dx, dz) > R_BUILD) continue;
       this._blocks.set(key, null); // reserved: queued
-      this._queue.push({ key, ix: bl.ix, jz: bl.jz });
+      this._queue.push({
+        key, ix: bl.ix, jz: bl.jz,
+        country: districtOf(bl.ix, bl.jz) === DISTRICT_COUNTRYSIDE,
+      });
     }
     // evict far blocks
     for (const [key, entry] of this._blocks) {
@@ -621,6 +663,12 @@ export class Curbs {
         if (seg.mway) continue;                       // none on the motorway
         const len = seg.s1 - seg.s0;
         if (len < 40) continue;
+        {   // no drainage infra on rural stretches (both flanking blocks fields)
+          const cell = Math.floor(((seg.s0 + seg.s1) * 0.5) / (seg.axis === 0 ? PERIOD_Z : PERIOD_X));
+          const dA = seg.axis === 0 ? districtOf(seg.line - 1, cell) : districtOf(cell, seg.line - 1);
+          const dB = seg.axis === 0 ? districtOf(seg.line, cell) : districtOf(cell, seg.line);
+          if (dA === DISTRICT_COUNTRYSIDE && dB === DISTRICT_COUNTRYSIDE) continue;
+        }
         const h0 = cellSeed(seg.axis * 7919 + seg.line, Math.round(seg.s0), 3);
         const nMh = h0 < 0.55 ? 1 : 0;
         for (let k = 0; k < nMh; k++) {
@@ -650,6 +698,10 @@ export class Curbs {
       const buf = new Float32Array(Math.max(1, crossings.length * 4) * 16);
       let k = 0;
       for (const it of crossings) {
+        if (districtOf(it.i - 1, it.j - 1) === DISTRICT_COUNTRYSIDE &&
+            districtOf(it.i, it.j - 1) === DISTRICT_COUNTRYSIDE &&
+            districtOf(it.i - 1, it.j) === DISTRICT_COUNTRYSIDE &&
+            districtOf(it.i, it.j) === DISTRICT_COUNTRYSIDE) continue;
         const fB = rowFace(it.j);
         for (let sx = -1; sx <= 1; sx += 2) {
           for (let sz = -1; sz <= 1; sz += 2) {
@@ -672,8 +724,8 @@ export class Curbs {
 
   _finishTask() {
     const t = this._task;
-    const mc = finalizeMesh(this.scene, `nlCurb_${t.key}`, t.qc, this._matCurb);
-    const mw = finalizeMesh(this.scene, `nlSidewalk_${t.key}`, t.qw, this._matWalk);
+    const mc = finalizeMesh(this.scene, `nlCurb_${t.key}`, t.qc, t.country ? this._matGrass : this._matCurb);
+    const mw = finalizeMesh(this.scene, `nlSidewalk_${t.key}`, t.qw, t.country ? this._matGrass : this._matWalk);
     this._blocks.set(t.key, { mc, mw });
     this._task = null;
     this.generation++;
@@ -684,7 +736,7 @@ export class Curbs {
     // live uniforms: follow-shadow matrix, road wetness, light-buffer count
     const lc = this._roadMat.lightCount;
     const sm = this._env.shadow.getTransformMatrix();
-    for (const m of [this._matWalk, this._matCurb]) {
+    for (const m of [this._matWalk, this._matCurb, this._matGrass]) {
       m.setMatrix('sunShadowMatrix', sm);
       m.setFloat('wetness', params.roadWetness);
       m.setFloat('lightCount', lc);
@@ -707,11 +759,11 @@ export class Curbs {
         if (!next) break;
         if (this._blocks.get(next.key) !== null) continue; // evicted while queued
         this._task = {
-          key: next.key, ix: next.ix, jz: next.jz,
+          key: next.key, ix: next.ix, jz: next.jz, country: next.country,
           qc: new GeoBuilder(), qw: new GeoBuilder(),
           gen: null,
         };
-        this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz);
+        this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz, next.country);
       }
       if (this._task.gen.next().done) this._finishTask();
     }
@@ -726,10 +778,10 @@ export class Curbs {
     while ((next = this._queue.shift())) {
       if (this._blocks.get(next.key) !== null) continue;
       this._task = {
-        key: next.key, ix: next.ix, jz: next.jz,
+        key: next.key, ix: next.ix, jz: next.jz, country: next.country,
         qc: new GeoBuilder(), qw: new GeoBuilder(), gen: null,
       };
-      this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz);
+      this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz, next.country);
       while (!this._task.gen.next().done) { /* run to completion */ }
       this._finishTask();
     }
@@ -742,7 +794,7 @@ export class Curbs {
   applyEnvironment(env) {
     const p = env.params;
     const si = env.sun.intensity;
-    for (const m of [this._matWalk, this._matCurb]) {
+    for (const m of [this._matWalk, this._matCurb, this._matGrass]) {
       const u = m._nl;
       u.sunDir.copyFrom(env.sunDir);
       u.sunColor.set(p.sunColor[0] * si, p.sunColor[1] * si, p.sunColor[2] * si);

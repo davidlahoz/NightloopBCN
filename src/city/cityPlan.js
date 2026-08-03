@@ -192,6 +192,7 @@ export const DISTRICT_DOWNTOWN = 0;
 export const DISTRICT_COMMERCIAL = 1;
 export const DISTRICT_RESIDENTIAL = 2;
 export const DISTRICT_INDUSTRIAL = 3;
+export const DISTRICT_COUNTRYSIDE = 4;
 
 export function districtOf(ix, jz) {
   const mi = Math.floor(ix / 3), mj = Math.floor(jz / 3);
@@ -199,10 +200,11 @@ export function districtOf(ix, jz) {
   // impression should be the hero look, districts unfold as you drive out
   if (mi >= -1 && mi <= 0 && mj >= -1 && mj <= 0) return DISTRICT_COMMERCIAL;
   const r = cellSeed(mi, mj, 977);
-  if (r < 0.24) return DISTRICT_DOWNTOWN;
-  if (r < 0.56) return DISTRICT_COMMERCIAL;
-  if (r < 0.82) return DISTRICT_RESIDENTIAL;
-  return DISTRICT_INDUSTRIAL;
+  if (r < 0.22) return DISTRICT_DOWNTOWN;
+  if (r < 0.52) return DISTRICT_COMMERCIAL;
+  if (r < 0.76) return DISTRICT_RESIDENTIAL;
+  if (r < 0.88) return DISTRICT_INDUSTRIAL;
+  return DISTRICT_COUNTRYSIDE;   // open fields; the roads run on through
 }
 
 /** Height bias 0..1 that clusters at macro scale (downtown cores read on the skyline). */

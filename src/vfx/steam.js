@@ -8,7 +8,10 @@ import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
 import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
 import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import { PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowIsMotorway, gridToWorld } from '../city/cityPlan.js';
+import {
+  PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowIsMotorway, gridToWorld,
+  districtOf, DISTRICT_COUNTRYSIDE,
+} from '../city/cityPlan.js';
 
 const _gw = { x: 0, z: 0 };
 import { groundHeight } from '../city/roadProfile.js';
@@ -107,7 +110,9 @@ export class Steam {
         _gw,
       );
       const vx = _gw.x, vz = _gw.z;
-      const vy = groundHeight(vx, vz);
+      // no city steam out in the fields: park rural vents out of sight
+      const vy = districtOf(Math.floor(carX / PERIOD_X), Math.floor(carZ / PERIOD_Z)) === DISTRICT_COUNTRYSIDE
+        ? -60 : groundHeight(vx, vz);
       for (let p = 0; p < PUFFS_PER_VENT; p++) {
         for (let c = 0; c < 4; c++) {
           const o3 = (q * 4 + c) * 3;

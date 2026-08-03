@@ -12,7 +12,10 @@ A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet 
   lives in a smoothly warped coordinate frame), and every 4th east-west road
   is a six-lane motorway with a barriered centre median. Drive any direction
   forever; revisited streets are always identical (everything is seeded from
-  cell coordinates).
+  cell coordinates). Districts cluster the character — downtown setback
+  towers, neon commercial strips with fire escapes, gabled residential rows,
+  brick industry — and ~1 in 8 macro cells is open countryside: unlit lanes
+  between grass fields and scattered trees, until the skyline rises again.
 
 ## The Stack
 
@@ -27,6 +30,9 @@ A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet 
 - **Road detail** legible at three scales: lanes, wear, grain
 - **Water physics** — tire tracks displace, reflections stretch, wetness lags the rain
 - **Neon and light** that doesn't clip to white, shadows that hold detail
+- **Traffic lights that cycle** — junctions run offset red/amber/green phases
+- **A minimap** top-right: north-up, bends with the real street curves,
+  motorways accented, countryside tinted green
 - **Aerial perspective** on distant buildings
 - **No placeholder, no rough edges.** If it doesn't look finished, it's cut.
 

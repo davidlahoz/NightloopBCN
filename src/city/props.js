@@ -34,9 +34,18 @@ import {
   districtOf,
 } from './cityPlan.js';
 
-// per-district street furniture density: [downtown, commercial, residential, industrial]
-const BOLLARD_P = [0.42, 0.25, 0.12, 0.04];
-const DUMPSTER_P = [0.15, 0.30, 0.22, 0.55];
+// per-district street furniture density: [downtown, commercial, residential, industrial, countryside]
+const BOLLARD_P = [0.42, 0.25, 0.12, 0.04, 0];
+const DUMPSTER_P = [0.15, 0.30, 0.22, 0.55, 0];
+const COUNTRY = 4;
+
+/** District flanking each side of a street segment. */
+function segDistricts(seg) {
+  const cell = Math.floor(((seg.s0 + seg.s1) * 0.5) / (seg.axis === 0 ? PERIOD_Z : PERIOD_X));
+  return seg.axis === 0
+    ? [districtOf(seg.line - 1, cell), districtOf(seg.line, cell)]
+    : [districtOf(cell, seg.line - 1), districtOf(cell, seg.line)];
+}
 import { groundHeight } from './roadProfile.js';
 import { hash2, fbm3, valueNoise } from './noise.js';
 
@@ -178,6 +187,24 @@ function setInstances(mesh, list, lift) {
   mesh.setEnabled(true);
 }
 
+/** Like setInstances but honours a per-item uniform scale {x,z,yaw,s}. */
+function setInstancesScaled(mesh, list, lift) {
+  if (list.length === 0) {
+    mesh.setEnabled(false);
+    return;
+  }
+  const f = new Float32Array(list.length * 16);
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const o = i * 16;
+    writeYawT(f, o, p.yaw, p.x, groundHeight(p.x, p.z) + lift, p.z);
+    for (let k = 0; k < 11; k++) f[o + k] *= p.s;   // scale the 3 basis rows
+  }
+  mesh.thinInstanceSetBuffer('matrix', f, 16, true);
+  mesh.thinInstanceRefreshBoundingInfo();
+  mesh.setEnabled(true);
+}
+
 // ---------------------------------------------------------------------------
 // procedural build-time textures
 function fillNoise(tex, base, amp, scale, speckle) {
@@ -222,6 +249,10 @@ export class Props {
     this.lightsGen = 0;
     this._si = 1;
     this._scanX = Infinity; this._scanZ = Infinity;
+    this._time = 0;
+    this._sigTick = 0;
+    /** @type {Array<{x:number,z:number,gy:number,yaw:number,isNS:boolean,phase:number}>} */
+    this._sigPoles = [];
 
     // shared build-time textures
     const roughTex = makeNoiseTexture(scene, 'nlPropRough', 190, 46, 0.085, false);
@@ -260,6 +291,12 @@ export class Props {
     green.emissiveColor.copyFromFloats(0.10, 1.0, 0.30);
     this._greenMat = green;
 
+    const amber = new PBRMaterial('nlPropSigAmber', scene);
+    amber.albedoColor.copyFromFloats(0.06, 0.04, 0.01);
+    amber.metallic = 0; amber.roughness = 0.25;
+    amber.emissiveColor.copyFromFloats(1.0, 0.62, 0.08);
+    this._amberMat = amber;
+
     const dark = new PBRMaterial('nlPropSigDark', scene);
     dark.albedoColor.copyFromFloats(0.022, 0.022, 0.026);   // unlit glass
     dark.metallic = 0; dark.roughness = 0.12;
@@ -283,12 +320,20 @@ export class Props {
     dgreen.useMetallnessFromMetallicTextureBlue = true;
     this._dumpsterMat = dgreen;
 
+    const bark = new PBRMaterial('nlPropBark', scene);
+    bark.albedoColor.copyFromFloats(0.155, 0.108, 0.068);
+    bark.albedoTexture = mottleTex;
+    bark.metallic = 0;
+    bark.roughness = 0.9;
+    this._barkMat = bark;
+
     // -- master meshes ------------------------------------------------------
     this._buildLampMasters(scene);
     this._buildSignalMasters(scene);
     this._buildBollardMaster(scene);
     this._buildJerseyMaster(scene);
     this._buildDumpsterMaster(scene);
+    this._buildTreeMasters(scene);
 
     this.applyEnvironment(env);
 
@@ -436,9 +481,101 @@ export class Props {
     this._sigDark = makeDome('nlSignalsDark');
     this._sigRed = makeDome('nlSignalsRed');
     this._sigGreen = makeDome('nlSignalsGreen');
+    this._sigAmber = makeDome('nlSignalsAmber');
     finalize(this._sigDark, this._darkMat);
     finalize(this._sigRed, this._redMat);
     finalize(this._sigGreen, this._greenMat);
+    finalize(this._sigAmber, this._amberMat);
+  }
+
+  /** Assign every lamp dome to red/amber/green/dark from the cycle clock. */
+  _updateSignals() {
+    const t = this._time;
+    const CYCLE = 16;              // seconds for a full junction cycle
+    const dark = [], redL = [], greenL = [], amberL = [];
+    for (const p of this._sigPoles) {
+      const c = (t / CYCLE + p.phase) % 1;
+      // N-S: green → amber → red; E-W: red while N-S runs, then green → amber
+      let state;                   // 0 red, 1 amber, 2 green
+      if (p.isNS) state = c < 0.42 ? 2 : c < 0.50 ? 1 : 0;
+      else state = c < 0.50 ? 0 : c < 0.92 ? 2 : 1;
+      for (let j = 0; j < 3; j++) {
+        const ly = 3.25 - j * 0.3;
+        const lit = (state === 0 && j === 0) || (state === 1 && j === 1) || (state === 2 && j === 2);
+        const target = lit ? (j === 0 ? redL : j === 1 ? amberL : greenL) : dark;
+        target.push({ x: p.x, y: p.gy + ly, z: p.z, yaw: p.yaw });
+      }
+    }
+    const setDomes = (mesh, list) => {
+      if (list.length === 0) { mesh.setEnabled(false); return; }
+      const f = new Float32Array(list.length * 16);
+      for (let i = 0; i < list.length; i++) {
+        writeYawT(f, i * 16, list[i].yaw, list[i].x, list[i].y, list[i].z);
+      }
+      mesh.thinInstanceSetBuffer('matrix', f, 16, true);
+      mesh.thinInstanceRefreshBoundingInfo();
+      mesh.setEnabled(true);
+    };
+    setDomes(this._sigDark, dark);
+    setDomes(this._sigRed, redL);
+    setDomes(this._sigGreen, greenL);
+    setDomes(this._sigAmber, amberL);
+  }
+
+  _buildTreeMasters(scene) {
+    // canopy texture: layered leaf-blob mass with alpha, deterministic LCG
+    const dt = new DynamicTexture('nlTreeCanopyTex', { width: 256, height: 256 }, scene, true);
+    dt.hasAlpha = true;
+    const ctx = dt.getContext();
+    ctx.clearRect(0, 0, 256, 256);
+    let s = 1234567;
+    const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < 240; i++) {
+      const a = rnd() * Math.PI * 2;
+      const rr = Math.pow(rnd(), 0.55);
+      const x = 128 + Math.cos(a) * rr * 105;
+      const y = 118 + Math.sin(a) * rr * 92 - rr * 12;
+      const rad = 7 + rnd() * 17;
+      const g = 42 + rnd() * 52, r = g * (0.42 + rnd() * 0.22), b2 = g * 0.34;
+      ctx.fillStyle = `rgba(${r | 0},${g | 0},${b2 | 0},${0.55 + rnd() * 0.45})`;
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    dt.update(false);
+
+    const canopyMat = new PBRMaterial('nlPropCanopy', scene);
+    canopyMat.albedoTexture = dt;
+    canopyMat.useAlphaFromAlbedoTexture = true;
+    canopyMat.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHATEST;
+    canopyMat.alphaCutOff = 0.35;
+    canopyMat.backFaceCulling = false;
+    canopyMat.metallic = 0;
+    canopyMat.roughness = 0.95;
+    canopyMat.specularIntensity = 0.15;
+    this._canopyMat = canopyMat;
+
+    const trunk = CreateCylinder('nlTreeTrunk', {
+      height: 3.0, diameterBottom: 0.38, diameterTop: 0.22, tessellation: 8,
+    }, scene);
+    trunk.position.y = 1.5;
+    trunk.bakeCurrentTransformIntoVertices();
+    this._treeTrunks = trunk;
+    finalize(trunk, this._barkMat);
+    trunk.metadata = { nlNoShadow: true };
+
+    // crossed quads carry the painted canopy
+    const quads = [];
+    for (let k = 0; k < 2; k++) {
+      const q = CreateBox('nlTreeQuad', { width: 6.2, height: 5.4, depth: 0.001 }, scene);
+      q.rotation.y = k * Math.PI / 2;
+      q.position.y = 4.6;
+      quads.push(q);
+    }
+    this._treeCanopy = Mesh.MergeMeshes(quads, true, true);
+    this._treeCanopy.name = 'nlTreeCanopies';
+    finalize(this._treeCanopy, canopyMat);
+    this._treeCanopy.metadata = { nlNoShadow: true };
   }
 
   _buildBollardMaster(scene) {
@@ -522,6 +659,10 @@ export class Props {
       const m = CORNER_R + 0.4;
       const a = seg.s0 + m, b = seg.s1 - m;
       if (b - a < 4) continue;
+      if (!seg.mway) {   // rural lanes are unlit (motorway keeps its lamps)
+        const [dA, dB] = segDistricts(seg);
+        if (dA === COUNTRY && dB === COUNTRY) continue;
+      }
       const segId = seg.axis * 7919 + seg.line;
       const segS0 = Math.round(seg.s0);
       const nL = Math.max(1, Math.round((b - a) / LIGHT_SPACING));
@@ -553,22 +694,28 @@ export class Props {
     }
     this.lightsGen++;
 
-    // ---- traffic signals: all motorway junctions + ~half of the rest
+    // ---- traffic signals: all motorway junctions + ~half of the rest.
+    // Poles are placed here; the LAMPS cycle live (see _updateSignals).
     const poles = [];
-    const dark = [], redL = [], greenL = [];
+    this._sigPoles = [];
     for (const cr of crossings) {
-      const signalised = cr.mway || cellSeed(cr.i, cr.j, 41) < 0.5;
+      // deep-country junctions are plain unsignalised crossroads
+      const rural = districtOf(cr.i - 1, cr.j - 1) === COUNTRY &&
+                    districtOf(cr.i, cr.j - 1) === COUNTRY &&
+                    districtOf(cr.i - 1, cr.j) === COUNTRY &&
+                    districtOf(cr.i, cr.j) === COUNTRY;
+      const signalised = !rural && (cr.mway || cellSeed(cr.i, cr.j, 41) < 0.5);
       if (!signalised) continue;
       const ox = CURB_FACE + CORNER_R - SIG_INSET;
       const oz = rowFace(cr.j) + CORNER_R - SIG_INSET;
-      const nsGreen = cellSeed(cr.i, cr.j, 43) < 0.5;
+      const phase = cellSeed(cr.i, cr.j, 43);     // junctions run offset cycles
       const dA = streetYawDelta(0, cr.i, cr.z);   // N-S street heading here
       const dB = streetYawDelta(1, cr.j, cr.x);   // E-W row heading here
       const defs = [
-        { gx: cr.x + ox, gz: cr.z + oz, yaw: Math.PI + dA, green: nsGreen },        // faces -z
-        { gx: cr.x - ox, gz: cr.z - oz, yaw: 0 + dA, green: nsGreen },              // faces +z
-        { gx: cr.x - ox, gz: cr.z + oz, yaw: Math.PI / 2 + dB, green: !nsGreen },   // faces +x
-        { gx: cr.x + ox, gz: cr.z - oz, yaw: -Math.PI / 2 + dB, green: !nsGreen },  // faces -x
+        { gx: cr.x + ox, gz: cr.z + oz, yaw: Math.PI + dA, isNS: true },        // faces -z
+        { gx: cr.x - ox, gz: cr.z - oz, yaw: 0 + dA, isNS: true },              // faces +z
+        { gx: cr.x - ox, gz: cr.z + oz, yaw: Math.PI / 2 + dB, isNS: false },   // faces +x
+        { gx: cr.x + ox, gz: cr.z - oz, yaw: -Math.PI / 2 + dB, isNS: false },  // faces -x
       ];
       for (const d of defs) {
         gridToWorld(d.gx, d.gz, _gw);
@@ -576,29 +723,16 @@ export class Props {
         it(poles, px, pz, d.yaw);
         const gy = groundHeight(px, pz) - 0.02;
         const cyaw = Math.cos(d.yaw), syaw = Math.sin(d.yaw);
-        for (let j = 0; j < 3; j++) {
-          const ly = 3.25 - j * 0.3;
-          const lit = d.green ? j === 2 : j === 0;
-          const x = px + 0.342 * syaw;
-          const z = pz + 0.342 * cyaw;
-          (lit ? (d.green ? greenL : redL) : dark).push({ x, z, y: gy + ly, yaw: d.yaw });
-        }
+        // lens sits proud of the ring's front cap (z=0.38) under the visor;
+        // recessed any deeper and the solid ring disc occludes the glow
+        this._sigPoles.push({
+          x: px + 0.398 * syaw, z: pz + 0.398 * cyaw, gy,
+          yaw: d.yaw, isNS: d.isNS, phase,
+        });
       }
     }
     setInstances(this._sigSteel, poles, -0.02);
-    const setDomes = (mesh, list) => {
-      if (list.length === 0) { mesh.setEnabled(false); return; }
-      const f = new Float32Array(list.length * 16);
-      for (let i = 0; i < list.length; i++) {
-        writeYawT(f, i * 16, list[i].yaw, list[i].x, list[i].y, list[i].z);
-      }
-      mesh.thinInstanceSetBuffer('matrix', f, 16, true);
-      mesh.thinInstanceRefreshBoundingInfo();
-      mesh.setEnabled(true);
-    };
-    setDomes(this._sigDark, dark);
-    setDomes(this._sigRed, redL);
-    setDomes(this._sigGreen, greenL);
+    this._updateSignals();
 
     // ---- bollards: sidewalk arcs on some non-motorway crossing corners
     const bollards = [];
@@ -667,6 +801,27 @@ export class Props {
       itG(dumps, x, z, yaw);
     }
     setInstances(this._dumpsters, dumps, -0.025);
+
+    // ---- trees: scattered across countryside meadows, size-varied
+    const trees = [];
+    for (const bl of blocksInRegion(minX, maxX, minZ, maxZ)) {
+      if (districtOf(bl.ix, bl.jz) !== COUNTRY) continue;
+      const n = 12 + ((cellSeed(bl.ix, bl.jz, 71) * 6) | 0);
+      for (let k = 0; k < n; k++) {
+        const hx = cellSeed(bl.ix, bl.jz, 300 + k);
+        const hz = cellSeed(bl.ix, bl.jz, 360 + k);
+        const gx = bl.x0 + 7 + (bl.x1 - bl.x0 - 14) * hx;
+        const gz = bl.z0 + 7 + (bl.z1 - bl.z0 - 14) * hz;
+        gridToWorld(gx, gz, _gw);
+        trees.push({
+          x: _gw.x, z: _gw.z,
+          yaw: (hx * 251) % (Math.PI * 2),
+          s: 0.75 + hz * 0.65,
+        });
+      }
+    }
+    setInstancesScaled(this._treeTrunks, trees, -0.06);
+    setInstancesScaled(this._treeCanopy, trees, -0.06);
   }
 
   // -- module contract --------------------------------------------------------
@@ -702,14 +857,23 @@ export class Props {
     this._greenMat.unfreeze();
     this._greenMat.emissiveIntensity = sig;
     this._greenMat.freeze();
+    this._amberMat.unfreeze();
+    this._amberMat.emissiveIntensity = sig;
+    this._amberMat.freeze();
 
     for (let i = 0; i < this._heads.length; i++) this._heads[i].intensity = si;
   }
 
-  /** Per-frame: rebuild instance buffers when the car has moved far enough. */
+  /** Per-frame: region rebuilds + the traffic-light cycle (throttled 3 Hz). */
   update(dt, camX, camZ) {
+    this._time += dt;
     if (Math.hypot(camX - this._scanX, camZ - this._scanZ) > RESCAN_DIST) {
       this._rebuild(camX, camZ);
+    }
+    this._sigTick += dt;
+    if (this._sigTick > 0.33) {
+      this._sigTick = 0;
+      this._updateSignals();
     }
   }
 

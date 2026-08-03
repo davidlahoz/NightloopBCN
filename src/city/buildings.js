@@ -49,6 +49,8 @@ const NEON_PAL = [
   [1.00, 0.16, 0.72], // magenta
   [1.00, 0.42, 0.10], // orange
   [1.00, 0.10, 0.12], // red
+  [0.25, 0.55, 1.00], // electric blue
+  [0.45, 1.00, 0.18], // acid green
 ];
 
 const NO_FRONTS = Object.freeze({ xm: false, xp: false, zm: false, zp: false });
@@ -99,6 +101,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   const { pos, nor, uvs, col, idx } = geo;
   const rng = mulberry32((cellSeed(ix, jz, 101) * 4294967296) | 0);
   const district = districtOf(ix, jz);
+  if (district === 4) return;   // countryside: open fields, no buildings
   const DIST = DISTRICTS[district];
   const hBias = districtHeightBias(ix, jz);   // clusters tall cores at macro scale
   const corners = [
@@ -261,7 +264,8 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     if (w < 7 || d < 7 || rng() < 0.25) return;
     const count = 1 + (rng() < 0.4 ? 1 : 0);
     for (let i = 0; i < count; i++) {
-      const kind = (rng() * 3) | 0;
+      // rooftop water tanks are a NY signature — favour them outside industry
+      const kind = rng() < (district <= 2 ? 0.45 : 0.2) ? 2 : ((rng() * 2) | 0);
       if (kind === 0) {
         const s = 1.5 + rng() * 0.7, hh = 0.9 + rng() * 0.4;
         const px = x0 + 1.8 + rng() * Math.max(0.1, w - 3.6 - s);
@@ -373,17 +377,37 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const hasUpper = h >= 22 && rng() < 0.45;
     if (hasUpper) h1 = h * (0.52 + rng() * 0.18);
 
-    mass(bx0, bz0, bx1, bz1, yBase, vOff + h1, vOff, seed, style, fronts);
     let tx0 = bx0, tz0 = bz0, tx1 = bx1, tz1 = bz1, topY = vOff + h1;
-    if (hasUpper) {
-      const fIn = 1.6 + rng() * 1.2, sIn = 1.0 + rng() * 0.8, bIn = 0.6;
-      const ux0 = bx0 + (o.nx < 0 ? fIn : o.nx > 0 ? bIn : sIn);
-      const ux1 = bx1 - (o.nx > 0 ? fIn : o.nx < 0 ? bIn : sIn);
-      const uz0 = bz0 + (o.nz < 0 ? fIn : o.nz > 0 ? bIn : sIn);
-      const uz1 = bz1 - (o.nz > 0 ? fIn : o.nz < 0 ? bIn : sIn);
-      if (ux1 - ux0 > 4.5 && uz1 - uz0 > 4.5) {
-        mass(ux0, uz0, ux1, uz1, vOff + h1 - 0.4, vOff + h, vOff, seed, style, fronts);
-        tx0 = ux0; tz0 = uz0; tx1 = ux1; tz1 = uz1; topY = vOff + h;
+    if (district === 0 && h >= 34 && rng() < 0.7) {
+      // NY wedding-cake: three setback tiers stepping toward the sky
+      const hA2 = h * (0.40 + rng() * 0.10);
+      const hB2 = h * (0.66 + rng() * 0.10);
+      mass(bx0, bz0, bx1, bz1, yBase, vOff + hA2, vOff, seed, style, fronts);
+      const i1 = 1.4 + rng() * 0.9;
+      const m1x0 = bx0 + i1, m1x1 = bx1 - i1, m1z0 = bz0 + i1, m1z1 = bz1 - i1;
+      if (m1x1 - m1x0 > 6 && m1z1 - m1z0 > 6) {
+        mass(m1x0, m1z0, m1x1, m1z1, vOff + hA2 - 0.4, vOff + hB2, vOff, seed, style, fronts);
+        const i2 = i1 + 1.4 + rng() * 0.9;
+        const m2x0 = bx0 + i2, m2x1 = bx1 - i2, m2z0 = bz0 + i2, m2z1 = bz1 - i2;
+        if (m2x1 - m2x0 > 4.5 && m2z1 - m2z0 > 4.5) {
+          mass(m2x0, m2z0, m2x1, m2z1, vOff + hB2 - 0.4, vOff + h, vOff, seed, style, fronts);
+          tx0 = m2x0; tz0 = m2z0; tx1 = m2x1; tz1 = m2z1; topY = vOff + h;
+        } else {
+          tx0 = m1x0; tz0 = m1z0; tx1 = m1x1; tz1 = m1z1; topY = vOff + hB2;
+        }
+      }
+    } else {
+      mass(bx0, bz0, bx1, bz1, yBase, vOff + h1, vOff, seed, style, fronts);
+      if (hasUpper) {
+        const fIn = 1.6 + rng() * 1.2, sIn = 1.0 + rng() * 0.8, bIn = 0.6;
+        const ux0 = bx0 + (o.nx < 0 ? fIn : o.nx > 0 ? bIn : sIn);
+        const ux1 = bx1 - (o.nx > 0 ? fIn : o.nx < 0 ? bIn : sIn);
+        const uz0 = bz0 + (o.nz < 0 ? fIn : o.nz > 0 ? bIn : sIn);
+        const uz1 = bz1 - (o.nz > 0 ? fIn : o.nz < 0 ? bIn : sIn);
+        if (ux1 - ux0 > 4.5 && uz1 - uz0 > 4.5) {
+          mass(ux0, uz0, ux1, uz1, vOff + h1 - 0.4, vOff + h, vOff, seed, style, fronts);
+          tx0 = ux0; tz0 = uz0; tx1 = ux1; tz1 = uz1; topY = vOff + h;
+        }
       }
     }
     roofClutter(tx0, tz0, tx1, tz1, topY, seed);
@@ -548,7 +572,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
   }
 
   const nSignsRoll = cellSeed(ix, jz, 9);
-  const nSigns = nSignsRoll < 0.45 * DIST.signs ? 1 : nSignsRoll < 0.72 * DIST.signs ? 2 : 0;
+  const nSigns = Math.min(3, Math.floor(nSignsRoll * 3.2 * DIST.signs));
   const flick = cellSeed(ix, jz, 13) < 0.18;
   frontCands.sort((a, b) => a.dInt - b.dInt);
   const picked = [];
@@ -565,9 +589,9 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
     const c = picked[i];
     setXform(c.xfPX, c.xfPZ, c.xfYaw);   // signs follow their building's warp
     const seed = rng();
-    const pal = NEON_PAL[Math.min(3, Math.floor(seed * 3.999))];
+    const pal = NEON_PAL[Math.min(5, Math.floor(seed * 5.999))];
     const flags = F_NEON | (flick && i === 0 ? F_FLICK : 0);
-    const blade = i === 1;
+    const blade = i >= 1;   // second/third signs are vertical NY blades
     if (blade) {
       // blade sign sticking out perpendicular to the facade
       const bw = 1.1 + rng() * 0.3, bh = 3.0 + rng() * 1.2;
@@ -616,7 +640,7 @@ function* buildBlockGen(ix, jz, rect, geo, lights) {
       const c = roofOk[(rng() * roofOk.length) | 0];
       setXform(c.xfPX, c.xfPZ, c.xfYaw);
       const seed = rng();
-      const pal = NEON_PAL[Math.min(3, Math.floor(seed * 3.999))];
+      const pal = NEON_PAL[Math.min(5, Math.floor(seed * 5.999))];
       const axis = c.nx !== 0 ? 0 : 1;
       const s = axis === 0 ? c.nx : c.nz;
       const spanLo = axis === 0 ? c.z0 : c.x0;

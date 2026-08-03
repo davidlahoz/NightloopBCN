@@ -75,13 +75,15 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     // ---------- neon sign quad; vMeta.zw = sign width / height ------------
     let sw = max(facadeW, 0.001);
     let sh = max(topV, 0.001);
-    var pals = array<vec3f, 4>(
+    var pals = array<vec3f, 6>(
       vec3f(0.10, 1.00, 0.85),   // teal
       vec3f(1.00, 0.16, 0.72),   // magenta
       vec3f(1.00, 0.42, 0.10),   // orange
-      vec3f(1.00, 0.10, 0.12)    // red
+      vec3f(1.00, 0.10, 0.12),   // red
+      vec3f(0.25, 0.55, 1.00),   // electric blue
+      vec3f(0.45, 1.00, 0.18)    // acid green
     );
-    let pcol = pals[u32(seed * 3.999)];
+    let pcol = pals[u32(seed * 5.999)];
     var flick = 1.0;
     if (doFlicker) {
       let t = uniforms.time;
@@ -255,6 +257,33 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
           let areaFrac = winF * winH / floorH;
           emis = emis + vec3f(0.95, 0.72, 0.47) *
                  (uniforms.windowLitFraction * 0.75 * areaFrac * (1.0 - gridFade));
+        }
+      }
+
+      // ---- fire escapes (NY): dark steel zigzag bolted over some street
+      // faces — platforms at each floor, alternating stair diagonals, rails
+      if (isFront && (dTint == 0u || dTint == 1u) && facadeW > 10.0 && v < topV - 1.0) {
+        if (fract(seed * 31.7) < 0.55) {
+          // repeating bays with per-bay presence — walk-up blocks carry
+          // several escapes, spaced like the real thing
+          let bayW2 = 10.0 + 4.0 * fract(seed * 7.7);
+          let uSh = u + bayW2 * fract(seed * 3.3);
+          let fb = floor(uSh / bayW2);
+          let fu = uSh - (fb + 0.5) * bayW2;
+          if (nlHash2(vec2<i32>(i32(fb) + iseed * 3, 911)) < 0.60 && abs(fu) < 1.15) {
+            let rowF2 = (v - GF_H) / floorH;
+            let fy = fract(rowF2);
+            let plat = step(fy, 0.10);
+            let dir = select(-1.0, 1.0, fract(floor(rowF2) * 0.5) < 0.25);
+            let stairT = clamp((fu * dir + 1.15) / 2.3, 0.0, 1.0);
+            let stair = 1.0 - smoothstep(0.06, 0.13, abs(fy - stairT * 0.80 - 0.10));
+            let rail = step(0.80, abs(fu) / 1.15) * step(fy, 0.60);
+            let fe = clamp(plat + stair * 0.9 + rail * 0.65, 0.0, 1.0) * detailFade;
+            // mid-grey steel: darker than masonry, clearly lighter than glass,
+            // with a whisper of ambient so it stays legible at night
+            albedo = mix(albedo, vec3f(0.10, 0.102, 0.108), fe * 0.92);
+            emis = mix(emis, uniforms.ambientSky * (uniforms.ambientIntensity * 0.05), fe * 0.85);
+          }
         }
       }
 
