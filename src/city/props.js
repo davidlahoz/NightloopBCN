@@ -711,11 +711,13 @@ export class Props {
       const phase = cellSeed(cr.i, cr.j, 43);     // junctions run offset cycles
       const dA = streetYawDelta(0, cr.i, cr.z);   // N-S street heading here
       const dB = streetYawDelta(1, cr.j, cr.x);   // E-W row heading here
+      // European near-side placement: each approach's signal stands on ITS
+      // near-right corner, facing the drivers stopped at the line beside it
       const defs = [
-        { gx: cr.x + ox, gz: cr.z + oz, yaw: Math.PI + dA, isNS: true },        // faces -z
-        { gx: cr.x - ox, gz: cr.z - oz, yaw: 0 + dA, isNS: true },              // faces +z
-        { gx: cr.x - ox, gz: cr.z + oz, yaw: Math.PI / 2 + dB, isNS: false },   // faces +x
-        { gx: cr.x + ox, gz: cr.z - oz, yaw: -Math.PI / 2 + dB, isNS: false },  // faces -x
+        { gx: cr.x + ox, gz: cr.z - oz, yaw: Math.PI + dA, isNS: true },        // SE, faces -z: northbound stops here
+        { gx: cr.x - ox, gz: cr.z + oz, yaw: 0 + dA, isNS: true },              // NW, faces +z: southbound
+        { gx: cr.x + ox, gz: cr.z + oz, yaw: Math.PI / 2 + dB, isNS: false },   // NE, faces +x: westbound
+        { gx: cr.x - ox, gz: cr.z - oz, yaw: -Math.PI / 2 + dB, isNS: false },  // SW, faces -x: eastbound
       ];
       for (const d of defs) {
         gridToWorld(d.gx, d.gz, _gw);
