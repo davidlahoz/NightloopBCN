@@ -10,7 +10,7 @@ import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { Vector2, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import {
   PERIOD_X, PERIOD_Z, colIndex, rowIndex, rowIsMotorway, gridToWorld,
-  districtOf, DISTRICT_COUNTRYSIDE,
+  districtOf, DISTRICT_COUNTRYSIDE, nsSegPresent,
 } from '../city/cityPlan.js';
 
 const _gw = { x: 0, z: 0 };
@@ -110,9 +110,10 @@ export class Steam {
         _gw,
       );
       const vx = _gw.x, vz = _gw.z;
-      // no city steam out in the fields: park rural vents out of sight
-      const vy = districtOf(Math.floor(carX / PERIOD_X), Math.floor(carZ / PERIOD_Z)) === DISTRICT_COUNTRYSIDE
-        ? -60 : groundHeight(vx, vz);
+      // hide vents in the fields, and vents anchored to a thinned-away street
+      const rural = districtOf(Math.floor(carX / PERIOD_X), Math.floor(carZ / PERIOD_Z)) === DISTRICT_COUNTRYSIDE;
+      const gone = d.ax === 0 && !nsSegPresent(ic, Math.floor((carZ + d.s) / PERIOD_Z));
+      const vy = rural || gone ? -60 : groundHeight(vx, vz);
       for (let p = 0; p < PUFFS_PER_VENT; p++) {
         for (let c = 0; c < 4; c++) {
           const o3 = (q * 4 + c) * 3;

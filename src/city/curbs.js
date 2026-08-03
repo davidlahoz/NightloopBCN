@@ -207,8 +207,8 @@ function projectToContour(p) {
  * curvature warp and projected onto the exact d=0 contour — the band bends
  * with the streets. u = accumulated WORLD arc length (texture continuity).
  */
-function buildBlockLoop(ix, jz) {
-  const w = ix * PERIOD_X, e = (ix + 1) * PERIOD_X;
+function buildBlockLoop(ix, ixEnd, jz) {
+  const w = ix * PERIOD_X, e = (ixEnd + 1) * PERIOD_X;   // merged blocks span cols
   const s = jz * PERIOD_Z, n = (jz + 1) * PERIOD_Z;
   const fS = rowFace(jz), fN = rowFace(jz + 1), fC = CURB_FACE;
   const R = CORNER_R;
@@ -296,8 +296,8 @@ function emitRowsRange(b, stripBase, pts, from, to, stations, isCurb) {
 }
 
 /** Cooperative block-band build: yields between row slices. */
-function* blockBandGen(qc, qw, ix, jz, country) {
-  const pts = buildBlockLoop(ix, jz);
+function* blockBandGen(qc, qw, ix, ixEnd, jz, country) {
+  const pts = buildBlockLoop(ix, ixEnd, jz);
   const baseC = qc.vcount();
   const baseW = qw.vcount();
   let i = 0;
@@ -308,7 +308,7 @@ function* blockBandGen(qc, qw, ix, jz, country) {
     i = end;
     yield;
   }
-  if (country) yield* fieldGen(qw, ix, jz);
+  if (country) yield* fieldGen(qw, ix, ixEnd, jz);
 }
 
 /**
@@ -317,9 +317,9 @@ function* blockBandGen(qc, qw, ix, jz, country) {
  * to a curve just inside the band's d=3 edge; sitting 4 mm below the band
  * hides the overlap seam (grass-on-grass, band renders on top).
  */
-function* fieldGen(qw, ix, jz) {
+function* fieldGen(qw, ix, ixEnd, jz) {
   const fC = CURB_FACE, inset = 2.85, sink = 0.004;
-  const x0 = ix * PERIOD_X + fC + inset, x1 = (ix + 1) * PERIOD_X - fC - inset;
+  const x0 = ix * PERIOD_X + fC + inset, x1 = (ixEnd + 1) * PERIOD_X - fC - inset;
   const z0 = jz * PERIOD_Z + rowFace(jz) + inset;
   const z1 = (jz + 1) * PERIOD_Z - rowFace(jz + 1) - inset;
   const nx = Math.max(2, Math.ceil((x1 - x0) / 9));
@@ -542,7 +542,9 @@ export class Curbs {
 
     /** @type {Map<string, {mc: Mesh|null, mw: Mesh|null}>} */
     this._blocks = new Map();
-    /** @type {Array<{key: string, ix: number, jz: number}>} */
+    /** @type {Map<string, {cx: number, cz: number, hx: number, hz: number}>} */
+    this._bmeta = new Map();
+    /** @type {Array<{key: string, ix: number, ixEnd: number, jz: number}>} */
     this._queue = [];
     this._task = null;   // {key, ix, jz, gen, qc, qw}
     this._scanX = Infinity; this._scanZ = Infinity;
@@ -630,19 +632,18 @@ export class Curbs {
       const dz = Math.max(0, Math.abs(cz - bcz) - hz);
       if (Math.hypot(dx, dz) > R_BUILD) continue;
       this._blocks.set(key, null); // reserved: queued
+      this._bmeta.set(key, { cx: bcx, cz: bcz, hx, hz });
       this._queue.push({
-        key, ix: bl.ix, jz: bl.jz,
+        key, ix: bl.ix, ixEnd: bl.ixEnd, jz: bl.jz,
         country: districtOf(bl.ix, bl.jz) === DISTRICT_COUNTRYSIDE,
       });
     }
-    // evict far blocks
+    // evict far blocks (merged blocks span cols — evict by their true rect)
     for (const [key, entry] of this._blocks) {
       if (this._task && this._task.key === key) continue;
-      const [ix, jz] = key.split(':').map(Number);
-      const bcx = (ix + 0.5) * PERIOD_X, bcz = (jz + 0.5) * PERIOD_Z;
-      const hx = PERIOD_X * 0.5 + 8, hz = PERIOD_Z * 0.5 + 8;
-      const dx = Math.max(0, Math.abs(cx - bcx) - hx);
-      const dz = Math.max(0, Math.abs(cz - bcz) - hz);
+      const m = this._bmeta.get(key);
+      const dx = Math.max(0, Math.abs(cx - m.cx) - m.hx);
+      const dz = Math.max(0, Math.abs(cz - m.cz) - m.hz);
       if (Math.hypot(dx, dz) > R_DROP) {
         if (entry) {
           if (entry.mc) entry.mc.dispose(false, false);
@@ -650,6 +651,7 @@ export class Curbs {
           this.generation++;
         }
         this._blocks.delete(key);
+        this._bmeta.delete(key);
       }
     }
   }
@@ -705,6 +707,8 @@ export class Curbs {
         const fB = rowFace(it.j);
         for (let sx = -1; sx <= 1; sx += 2) {
           for (let sz = -1; sz <= 1; sz += 2) {
+            // T junctions: corners on a missing N-S arm's side don't exist
+            if (sz > 0 ? !it.armN : !it.armS) continue;
             const onNS = sx * sz > 0;      // alternate arms around each corner
             const gx = onNS ? it.x + sx * (CURB_FACE - 0.25) : it.x + sx * (CURB_FACE + CORNER_R + 0.9);
             const gz = onNS ? it.z + sz * (fB + CORNER_R + 0.9) : it.z + sz * (fB - 0.25);
@@ -763,7 +767,7 @@ export class Curbs {
           qc: new GeoBuilder(), qw: new GeoBuilder(),
           gen: null,
         };
-        this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz, next.country);
+        this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.ixEnd, next.jz, next.country);
       }
       if (this._task.gen.next().done) this._finishTask();
     }
@@ -781,7 +785,7 @@ export class Curbs {
         key: next.key, ix: next.ix, jz: next.jz, country: next.country,
         qc: new GeoBuilder(), qw: new GeoBuilder(), gen: null,
       };
-      this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.jz, next.country);
+      this._task.gen = blockBandGen(this._task.qc, this._task.qw, next.ix, next.ixEnd, next.jz, next.country);
       while (!this._task.gen.next().done) { /* run to completion */ }
       this._finishTask();
     }

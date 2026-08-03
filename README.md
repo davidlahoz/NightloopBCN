@@ -10,12 +10,17 @@ A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet 
   — roads, curbs, buildings, signage, lights are generated on the fly and
   discarded behind you. Streets sweep in gentle S-curves (the whole plan
   lives in a smoothly warped coordinate frame), and every 4th east-west road
-  is a six-lane motorway with a barriered centre median. Drive any direction
-  forever; revisited streets are always identical (everything is seeded from
-  cell coordinates). Districts cluster the character — downtown setback
-  towers, neon commercial strips with fire escapes, gabled residential rows,
-  brick industry — and ~1 in 8 macro cells is open countryside: unlit lanes
-  between grass fields and scattered trees, until the skyline rises again.
+  is a six-lane motorway with a barriered centre median. The grid is
+  THINNED like a real city: some side streets simply don't exist, so blocks
+  run long (up to 600 m), junctions become T's, and some neighbourhoods keep
+  a tight grid while others go long-block. Districts cluster the character —
+  downtown setback towers, neon commercial strips with fire escapes, gabled
+  residential rows, brick industry — and ~1 in 8 macro cells is open
+  countryside: unlit lanes between grass fields and scattered trees.
+- **Different every time.** Each load rolls a fresh world seed: the street
+  topology, districts, skyline and props all reshuffle. Within a session
+  revisited streets are always identical. The seed is logged to the console
+  — pin a city you like with `?seed=N`.
 
 ## The Stack
 

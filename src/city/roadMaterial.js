@@ -12,6 +12,7 @@ import { StorageBuffer } from '@babylonjs/core/Buffers/storageBuffer.js';
 import { Plane } from '@babylonjs/core/Maths/math.plane.js';
 import { Vector2, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector.js';
 import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { WORLD_SEED } from '../core/worldSeed.js';
 import { defineParam, params } from '../core/params.js';
 import { quality } from '../core/quality.js';
 import roadVertex from '../shaders/road.vertex.wgsl?raw';
@@ -93,6 +94,8 @@ export class RoadMaterial {
     // ---- static-ish uniforms ----
     mat.setFloat('time', 0);
     mat.setFloat('shadowMapSize', quality.shadowSize);
+    // per-load map seed — the shader's street-thinning hash must match cityPlan
+    mat.setInt('worldSeed', WORLD_SEED | 0);
     // sun ortho near/far — used to reconstruct the light-view depth metric
     this._shadowDV = new Vector2(env.sun.shadowMinZ, env.sun.shadowMaxZ);
     mat.setVector2('shadowDV', this._shadowDV);

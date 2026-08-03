@@ -696,6 +696,7 @@ export class Buildings {
 
     /** @type {Map<string, {mesh: Mesh|null, lights: Array}|null>} */
     this._blocks = new Map();
+    this._bmeta = new Map();
     this._queue = [];
     this._task = null;   // {key, ix, jz, rect, gen, geo, lights}
     this._scanX = Infinity; this._scanZ = Infinity;
@@ -735,15 +736,16 @@ export class Buildings {
       const dz = Math.max(0, Math.abs(cz - bcz) - (bl.z1 - bl.z0) * 0.5);
       if (Math.hypot(dx, dz) > R_BUILD) continue;
       this._blocks.set(key, null);
+      this._bmeta.set(key, { cx: bcx, cz: bcz, hx: (bl.x1 - bl.x0) * 0.5, hz: (bl.z1 - bl.z0) * 0.5 });
       this._queue.push({ key, ix: bl.ix, jz: bl.jz, rect: bl });
     }
     for (const [key, entry] of this._blocks) {
       if (this._task && this._task.key === key) continue;
-      const [ix, jz] = key.split(':').map(Number);
-      const bcx = (ix + 0.5) * PERIOD_X, bcz = (jz + 0.5) * PERIOD_Z;
-      const dx = Math.max(0, Math.abs(cx - bcx) - PERIOD_X * 0.5);
-      const dz = Math.max(0, Math.abs(cz - bcz) - PERIOD_Z * 0.5);
+      const m = this._bmeta.get(key);   // merged blocks span cols: true rect
+      const dx = Math.max(0, Math.abs(cx - m.cx) - m.hx);
+      const dz = Math.max(0, Math.abs(cz - m.cz) - m.hz);
       if (Math.hypot(dx, dz) > R_DROP) {
+        this._bmeta.delete(key);
         if (entry) {
           if (entry.mesh) entry.mesh.dispose(false, false);
           this.generation++;

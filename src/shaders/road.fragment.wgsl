@@ -30,6 +30,7 @@ uniform headlight0 : vec4f;        // xyz pos, w intensity (0 = off)
 uniform headlight1 : vec4f;
 uniform headlightTip0 : vec4f;     // beam target point
 uniform headlightTip1 : vec4f;
+uniform worldSeed : i32;           // per-load map seed (cityPlan WORLD_SEED)
 
 var asphaltAlbedo : texture_2d<f32>;
 var asphaltAlbedoSampler : sampler;
@@ -73,6 +74,32 @@ fn isMwayRow(j : f32) -> f32 {
   return select(0.0, 1.0, abs(m - 2.0) < 0.5);
 }
 
+// ---- street thinning: EXACT u32 replica of cityPlan.js cellSeed/nsSegPresent
+fn nlCellSeedI(i : i32, j : i32, salt : i32) -> f32 {
+  var h : i32 = i * 374761393 + j * 668265263 + salt * -2048144777 + uniforms.worldSeed;
+  h = (h ^ i32(u32(h) >> 13u)) * 1274126177;
+  let hu = u32(h);
+  return f32(hu ^ (hu >> 16u)) / 4294967296.0;
+}
+
+fn nlFloorDiv3(a : i32) -> i32 {
+  return i32(floor(f32(a) / 3.0));
+}
+
+fn nsDropCand(i : i32, jc : i32) -> bool {
+  let p = 0.16 + 0.34 * nlCellSeedI(nlFloorDiv3(i), nlFloorDiv3(jc), 611);
+  return nlCellSeedI(i, jc, 271) < p;
+}
+
+fn nsDropRaw(i : i32, jc : i32) -> bool {
+  return nsDropCand(i, jc) && !nsDropCand(i, jc - 1);
+}
+
+fn nsSegPresent(i : i32, jc : i32) -> bool {
+  if (i == 0 && (jc == -1 || jc == 0)) { return true; }   // spawn street pinned
+  return !(nsDropRaw(i, jc) && !(nsDropRaw(i - 1, jc) && nsDropRaw(i - 2, jc)));
+}
+
 // street curvature: world → grid domain warp (MUST match cityPlan.js warpOf)
 fn nlWarp(p : vec2f) -> vec2f {
   let wx = 4.5 * sin(p.y * 0.0146126 + 0.9) + 2.0 * sin(p.y * 0.0299199 + 4.1);
@@ -89,6 +116,22 @@ fn roadSpace(pw : vec2f) -> RS {
   rs.tB = p.y - iB * NL_PZ; rs.sB = p.x;
   rs.mwayB = isMwayRow(iB);
   rs.faceB = mix(NL_FACE, NL_MWAY_FACE, rs.mwayB);
+
+  // street thinning (matches cityPlan.js sampleRoadSpace): the phantom N-S
+  // street is pushed far away beyond the row band; inside the band the
+  // junction stays whole while either arm exists
+  {
+    let ii = i32(iA);
+    let jj = i32(iB);
+    let armN = nsSegPresent(ii, jj);
+    let armS = nsSegPresent(ii, jj - 1);
+    if (!(armN && armS)) {
+      var colHere = armN || armS;
+      if (rs.tB > rs.faceB) { colHere = armN; }
+      else if (rs.tB < -rs.faceB) { colHere = armS; }
+      if (!colHere) { rs.tA = NL_FACE + 40.0; }
+    }
+  }
   let dA = abs(rs.tA) - NL_FACE;
   let dB = abs(rs.tB) - rs.faceB;
   rs.dA = dA; rs.dB = dB;

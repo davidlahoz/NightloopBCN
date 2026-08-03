@@ -704,7 +704,8 @@ export class Props {
                     districtOf(cr.i, cr.j - 1) === COUNTRY &&
                     districtOf(cr.i - 1, cr.j) === COUNTRY &&
                     districtOf(cr.i, cr.j) === COUNTRY;
-      const signalised = !rural && (cr.mway || cellSeed(cr.i, cr.j, 41) < 0.5);
+      // only full 4-way junctions get signals; thinned Ts are give-way
+      const signalised = !rural && cr.armN && cr.armS && (cr.mway || cellSeed(cr.i, cr.j, 41) < 0.5);
       if (!signalised) continue;
       const ox = CURB_FACE + CORNER_R - SIG_INSET;
       const oz = rowFace(cr.j) + CORNER_R - SIG_INSET;
@@ -742,6 +743,7 @@ export class Props {
       if (cr.mway) continue;
       for (let sx = -1; sx <= 1; sx += 2) {
         for (let sz = -1; sz <= 1; sz += 2) {
+          if (sz > 0 ? !cr.armN : !cr.armS) continue;   // no corner on a T's flat side
           const roll = cellSeed(cr.i * 2 + (sx > 0 ? 1 : 0), cr.j * 2 + (sz > 0 ? 1 : 0), 47);
           // corner arcs are commonest downtown, rare in industrial blocks
           const bp = BOLLARD_P[districtOf(cr.i + (sx > 0 ? 0 : -1), cr.j + (sz > 0 ? 0 : -1))];
@@ -792,13 +794,13 @@ export class Props {
         z = (bl.jz + 1) * PERIOD_Z - rowSwEdge(bl.jz + 1) + 0.85;
         yaw = streetYawDelta(1, bl.jz + 1, x) + (roll - 0.15) * 0.4;
       } else if (side === 2) { // west sidewalk
-        x = bl.ix * PERIOD_X + SIDEWALK_EDGE - 0.85;
+        x = bl.x0 - 0.85;
         z = bl.z0 + (bl.z1 - bl.z0) * f;
         yaw = Math.PI / 2 + streetYawDelta(0, bl.ix, z) + (roll - 0.15) * 0.4;
-      } else {                 // east sidewalk
-        x = (bl.ix + 1) * PERIOD_X - SIDEWALK_EDGE + 0.85;
+      } else {                 // east sidewalk (merged blocks: true east edge)
+        x = bl.x1 + 0.85;
         z = bl.z0 + (bl.z1 - bl.z0) * f;
-        yaw = Math.PI / 2 + streetYawDelta(0, bl.ix + 1, z) + (roll - 0.15) * 0.4;
+        yaw = Math.PI / 2 + streetYawDelta(0, bl.ixEnd + 1, z) + (roll - 0.15) * 0.4;
       }
       itG(dumps, x, z, yaw);
     }
@@ -808,7 +810,7 @@ export class Props {
     const trees = [];
     for (const bl of blocksInRegion(minX, maxX, minZ, maxZ)) {
       if (districtOf(bl.ix, bl.jz) !== COUNTRY) continue;
-      const n = 12 + ((cellSeed(bl.ix, bl.jz, 71) * 6) | 0);
+      const n = (12 + ((cellSeed(bl.ix, bl.jz, 71) * 6) | 0)) * (bl.ixEnd - bl.ix + 1);
       for (let k = 0; k < n; k++) {
         const hx = cellSeed(bl.ix, bl.jz, 300 + k);
         const hz = cellSeed(bl.ix, bl.jz, 360 + k);

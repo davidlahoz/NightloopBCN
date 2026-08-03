@@ -7,7 +7,7 @@
  */
 import {
   PERIOD_X, PERIOD_Z, rowFace, rowIsMotorway, gridToWorld,
-  districtOf, DISTRICT_COUNTRYSIDE,
+  districtOf, DISTRICT_COUNTRYSIDE, nsSegPresent,
 } from '../city/cityPlan.js';
 
 const RANGE = 260;          // metres of world shown from centre to edge
@@ -73,12 +73,12 @@ export class Minimap {
       }
     }
 
-    // street polylines through the warp
-    const stroke = (line, axis, mway) => {
+    // street polylines through the warp (s0..s1 in grid space along the line)
+    const stroke = (line, axis, mway, s0, s1) => {
       ctx.beginPath();
-      const n = Math.ceil((RANGE * 2) / SAMPLE_STEP);
+      const n = Math.max(2, Math.ceil((s1 - s0) / SAMPLE_STEP));
       for (let k = 0; k <= n; k++) {
-        const s = (axis === 0 ? cz : cx) - RANGE + (RANGE * 2) * (k / n);
+        const s = s0 + (s1 - s0) * (k / n);
         gridToWorld(axis === 0 ? line * PERIOD_X : s, axis === 0 ? s : line * PERIOD_Z, _gw);
         const x = px(_gw.x), y = py(_gw.z);
         if (k === 0) ctx.moveTo(x, y);
@@ -93,10 +93,17 @@ export class Minimap {
       }
       ctx.stroke();
     };
+    // N-S streets: draw per row-cell, skipping thinned-away segments
     const i0 = Math.round((cx - RANGE) / PERIOD_X), i1 = Math.round((cx + RANGE) / PERIOD_X);
-    for (let i = i0; i <= i1; i++) stroke(i, 0, false);
+    const jc0 = Math.floor((cz - RANGE) / PERIOD_Z), jc1 = Math.floor((cz + RANGE) / PERIOD_Z);
+    for (let i = i0; i <= i1; i++) {
+      for (let jc = jc0; jc <= jc1; jc++) {
+        if (!nsSegPresent(i, jc)) continue;
+        stroke(i, 0, false, jc * PERIOD_Z, (jc + 1) * PERIOD_Z);
+      }
+    }
     const j0 = Math.round((cz - RANGE) / PERIOD_Z), j1 = Math.round((cz + RANGE) / PERIOD_Z);
-    for (let j = j0; j <= j1; j++) stroke(j, 1, rowIsMotorway(j));
+    for (let j = j0; j <= j1; j++) stroke(j, 1, rowIsMotorway(j), cx - RANGE, cx + RANGE);
 
     // car: heading arrow at centre (north-up map; forward = (sin yaw, cos yaw))
     ctx.save();

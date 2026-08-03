@@ -4,6 +4,7 @@
  */
 import * as BABYLON from '@babylonjs/core';
 import { loadingScreen } from './core/loadingScreen.js';
+import { WORLD_SEED } from './core/worldSeed.js';
 import { Input } from './core/input.js';
 import { FrameStats } from './core/stats.js';
 import { Overlay } from './ui/overlay.js';
@@ -223,7 +224,7 @@ async function main() {
   window.addEventListener('resize', () => engine.resize());
 
   // ---- debug / capture handle ----
-  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, engineAudio, props, buildings, curbs, skyline, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
+  const NL = { engine, scene, car, chase, env, roadMat, roadChunks, post, stats, weather, surface, engineAudio, props, buildings, curbs, skyline, seed: WORLD_SEED, ready: false, frame: 0, refreshRenderLists, cityModules, maxRenderMs: 0, maxSimMs: 0 };
   window.__NIGHTLOOP__ = NL;
   window.BABYLON = BABYLON; // debug console access
 

@@ -17,6 +17,8 @@
  * All queries are allocation-free.
  */
 
+import { WORLD_SEED } from '../core/worldSeed.js';
+
 export const PERIOD_X = 200;     // N-S street spacing (streets run along Z)
 export const PERIOD_Z = 160;     // E-W street spacing (streets run along X)
 export const MWAY_MOD = 4;       // every 4th E-W row…
@@ -141,10 +143,22 @@ export function sampleRoadSpace(x, z, out) {
   const wz = z + _w.z;
   const iA = colIndex(wx);
   const iB = rowIndex(wz);
-  const tA = wx - iA * PERIOD_X;
+  let tA = wx - iA * PERIOD_X;
   const tB = wz - iB * PERIOD_Z;
   const faceA = CURB_FACE;
   const faceB = rowFace(iB);
+
+  // street thinning: suppress the N-S street where its segment is absent.
+  // Inside the row band the junction stays whole if EITHER arm exists, so a
+  // T junction's paint/heights are seamless; beyond the band the phantom
+  // street vanishes entirely (tA pushed far → block face runs straight).
+  const armN = nsSegPresent(iA, iB);
+  const armS = nsSegPresent(iA, iB - 1);
+  if (!(armN && armS)) {
+    const colHere = tB > faceB ? armN : tB < -faceB ? armS : (armN || armS);
+    if (!colHere) tA = faceA + 40;
+  }
+
   const dA = Math.abs(tA) - faceA;
   const dB = Math.abs(tB) - faceB;
 
@@ -213,11 +227,54 @@ export function districtHeightBias(ix, jz) {
   return 0.55 * cellSeed(mi, mj, 31) + 0.45 * cellSeed(ix, jz, 5);
 }
 
-/** Deterministic per-cell seed in [0,1). */
+/**
+ * Deterministic per-cell seed in [0,1). Mixes the per-load WORLD_SEED so the
+ * whole map reshuffles each visit. The road shader replicates this EXACTLY
+ * in u32 math (road.fragment.wgsl nlCellSeed) — change both or neither.
+ */
 export function cellSeed(i, j, salt = 0) {
-  let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(salt, 2246822519)) | 0;
+  let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263)
+         + Math.imul(salt, 2246822519) + (WORLD_SEED | 0)) | 0;
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// ---------------------------------------------------------------------------
+// Street thinning — real cities are not full grids. Some N-S street segments
+// are absent: two or three blocks merge into a long block and the crossing
+// becomes a T junction. Two invariants keep everything sane:
+//   1. a crossing never loses BOTH its N-S arms (a candidate drop is void when
+//      the segment south of it is also a candidate) — every grid crossing
+//      stays at least a T, so junction paint/logic stays coherent;
+//   2. at most two consecutive columns drop in a row-cell — merged blocks cap
+//      at 3 cells (600 m), and blocksInRegion's run-walk stays bounded.
+// E-W rows are never thinned (connectivity is guaranteed through them, and
+// motorways must run forever). Mirrored EXACTLY in road.fragment.wgsl.
+// ---------------------------------------------------------------------------
+function nsDropCand(i, jc) {
+  // macro cells set the local grid tightness: some neighbourhoods keep a
+  // dense grid, others go long-block
+  const p = 0.16 + 0.34 * cellSeed(Math.floor(i / 3), Math.floor(jc / 3), 611);
+  return cellSeed(i, jc, 271) < p;
+}
+
+function nsDropRaw(i, jc) {
+  return nsDropCand(i, jc) && !nsDropCand(i, jc - 1);
+}
+
+const _segMemo = new Map();
+
+/** True when the N-S street at col i exists between rows jc and jc+1. */
+export function nsSegPresent(i, jc) {
+  // the spawn street must always exist (the car boots onto it)
+  if (i === 0 && (jc === -1 || jc === 0)) return true;
+  const key = (i + 32768) * 65536 + (jc + 32768);
+  const hit = _segMemo.get(key);
+  if (hit !== undefined) return hit;
+  const v = !(nsDropRaw(i, jc) && !(nsDropRaw(i - 1, jc) && nsDropRaw(i - 2, jc)));
+  if (_segMemo.size > 8192) _segMemo.clear();
+  _segMemo.set(key, v);
+  return v;
 }
 
 /**
@@ -229,14 +286,21 @@ export function blocksInRegion(minX, maxX, minZ, maxZ) {
   const out = [];
   const i0 = Math.floor(minX / PERIOD_X), i1 = Math.ceil(maxX / PERIOD_X);
   const j0 = Math.floor(minZ / PERIOD_Z), j1 = Math.ceil(maxZ / PERIOD_Z);
-  for (let i = i0; i < i1; i++) {
-    for (let j = j0; j < j1; j++) {
+  for (let j = j0; j < j1; j++) {
+    // a run may be anchored up to 2 cols left of the region (3-cell cap)
+    let i = i0;
+    while (!nsSegPresent(i, j)) i--;
+    while (i < i1) {
+      let span = 1;
+      while (!nsSegPresent(i + span, j)) span++;
       const x0 = i * PERIOD_X + SIDEWALK_EDGE;
-      const x1 = (i + 1) * PERIOD_X - SIDEWALK_EDGE;
+      const x1 = (i + span) * PERIOD_X - SIDEWALK_EDGE;
       const z0 = j * PERIOD_Z + rowSwEdge(j);
       const z1 = (j + 1) * PERIOD_Z - rowSwEdge(j + 1);
-      if (x1 - x0 < 12 || z1 - z0 < 12) continue;
-      out.push({ ix: i, jz: j, x0, z0, x1, z1, seed: cellSeed(i, j) });
+      if (x1 >= minX && x0 <= maxX) {
+        out.push({ ix: i, ixEnd: i + span - 1, jz: j, x0, z0, x1, z1, seed: cellSeed(i, j) });
+      }
+      i += span;
     }
   }
   return out;
@@ -252,11 +316,12 @@ export function segmentsInRegion(minX, maxX, minZ, maxZ) {
   const out = [];
   const i0 = Math.floor(minX / PERIOD_X), i1 = Math.ceil(maxX / PERIOD_X);
   const j0 = Math.floor(minZ / PERIOD_Z), j1 = Math.ceil(maxZ / PERIOD_Z);
-  // N-S streets: cols i0..i1, pieces between rows
+  // N-S streets: cols i0..i1, pieces between rows (thinned segments skipped)
   for (let i = i0; i <= i1; i++) {
     const cx = i * PERIOD_X;
     if (cx + CURB_FACE < minX || cx - CURB_FACE > maxX) continue;
     for (let j = j0; j < j1; j++) {
+      if (!nsSegPresent(i, j)) continue;
       const s0 = j * PERIOD_Z + rowFace(j);
       const s1 = (j + 1) * PERIOD_Z - rowFace(j + 1);
       if (s1 < minZ || s0 > maxZ || s1 - s0 < 1) continue;
@@ -278,14 +343,22 @@ export function segmentsInRegion(minX, maxX, minZ, maxZ) {
   return out;
 }
 
-/** Crossings (i, j) intersecting a region, with the E-W row's type. */
+/**
+ * Crossings (i, j) intersecting a region, with the E-W row's type and which
+ * N-S arms exist (armN above the row, armS below — never both false).
+ * Crossings with no N-S arm at all cannot occur; a straight-through row cell
+ * with both neighbours thinned is prevented by the thinning invariants.
+ */
 export function crossingsInRegion(minX, maxX, minZ, maxZ) {
   const out = [];
   const i0 = Math.round(minX / PERIOD_X), i1 = Math.round(maxX / PERIOD_X);
   const j0 = Math.round(minZ / PERIOD_Z), j1 = Math.round(maxZ / PERIOD_Z);
   for (let i = i0; i <= i1; i++) {
     for (let j = j0; j <= j1; j++) {
-      out.push({ i, j, x: i * PERIOD_X, z: j * PERIOD_Z, mway: rowIsMotorway(j) });
+      out.push({
+        i, j, x: i * PERIOD_X, z: j * PERIOD_Z, mway: rowIsMotorway(j),
+        armN: nsSegPresent(i, j), armS: nsSegPresent(i, j - 1),
+      });
     }
   }
   return out;
