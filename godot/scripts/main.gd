@@ -41,6 +41,7 @@ var speedo: Speedo
 var street_names: StreetNames
 var street_plaque: StreetPlaque
 var traffic: TrafficSystem
+var bcn_lights: BarcelonaStreetlights
 var _street_accum := 0.0
 var _trip_m := 0.0
 var _space: PhysicsDirectSpaceState3D
@@ -155,6 +156,8 @@ func _ready() -> void:
 		canvas.add_child(street_plaque)
 		traffic = TrafficSystem.new(street_names)
 		add_child(traffic)
+		bcn_lights = BarcelonaStreetlights.new(street_names)
+		add_child(bcn_lights)
 
 	# ---- prewarm the streamers around the spawn ----
 	if barcelona != null:
@@ -240,6 +243,8 @@ func _process(raw_dt: float) -> void:
 		barcelona.update(dt, car.pos.x, car.pos.z)
 		if traffic != null:
 			traffic.update(dt, car.pos)
+		if bcn_lights != null:
+			bcn_lights.update(dt, car.pos.x, car.pos.z)
 	else:
 		ground.update(dt, car.pos.x, car.pos.z)
 		buildings.update(dt, car.pos.x, car.pos.z)
@@ -254,13 +259,13 @@ func _process(raw_dt: float) -> void:
 			street_plaque.set_street(street_names.query(car.pos.x, car.pos.z))
 		street_plaque.update_plaque(dt)
 	if OS.get_cmdline_user_args().has("--probe") and _frame % 120 == 0:
-		var nearest := 1e9
-		if traffic != null:
-			for t in traffic._cars:
-				nearest = minf(nearest, Vector2(t.node.position.x - car.pos.x, t.node.position.z - car.pos.z).length())
-		print("PROBE f=%d speed=%.1f vz=%.2f vx=%.2f thr=%s cars=%d nearest=%.1f" % [
-			_frame, car.speed, car.vz, car.vx, Input.is_action_pressed("throttle"),
-			traffic._cars.size() if traffic != null else -1, nearest])
+		print("PROBE f=%d speed=%.1f poles=%d heads=%d li=%.2f lamp_e=%.1f head_local=%v" % [
+			_frame, car.speed,
+			bcn_lights._mm.instance_count if bcn_lights != null else -1,
+			bcn_lights._heads.size() if bcn_lights != null else -1,
+			bcn_lights.intensity if bcn_lights != null else -1.0,
+			bcn_lights._lamp_mat.emission_energy_multiplier if bcn_lights != null else -1.0,
+			bcn_lights._head_local if bcn_lights != null else Vector3.ZERO])
 	_update_hud(raw_dt)
 	_frame += 1
 	if not _screenshot_path.is_empty() and _frame == _shot_frame:
@@ -347,6 +352,8 @@ func _on_env_push(params: Dictionary, _headlights: float) -> void:
 		street_lights.set_intensity(params.streetlight_intensity)
 	if barcelona != null:
 		barcelona.apply_environment(params)
+	if bcn_lights != null:
+		bcn_lights.set_intensity(params.streetlight_intensity)
 
 
 ## Point the spawned car down the street: probe 16 headings and pick the one
