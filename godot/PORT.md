@@ -1,8 +1,8 @@
 # NIGHTLOOP — Godot port
 
-The Babylon.js/WebGPU demo rebuilt as a Godot 4.7 project (Forward+), on the
-way to becoming a proper game. The web demo stays untouched at the repo root;
-everything Godot lives in `godot/`.
+The Babylon.js/WebGPU demo rebuilt as a Godot 4.7 project (Forward+), grown
+into the Barcelona game. The original web demo lives in the NightLoop
+repository; everything here is Godot.
 
 ## Worlds
 

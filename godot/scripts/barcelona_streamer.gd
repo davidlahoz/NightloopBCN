@@ -132,37 +132,6 @@ func _build_materials() -> void:
 		"mat_wall_commercial": wall.call(Color(0.47, 0.45, 0.42)),
 		"mat_wall_industrial": wall.call(Color(0.38, 0.38, 0.37)),
 	}
-	_load_facade_atlas()
-
-
-## Harvested Mapillary facade patches (CC BY-SA, tools/build_facade_atlas.py).
-## When present, walls sample real Barcelona photography instead of the
-## procedural window grid.
-func _load_facade_atlas() -> void:
-	const DIR := "res://assets/textures/facade_atlas"
-	var files: Array[String] = []
-	var i := 0
-	while ResourceLoader.exists("%s/%02d.png" % [DIR, i]):
-		files.append("%s/%02d.png" % [DIR, i])
-		i += 1
-	if files.size() < 4:
-		return
-	var images: Array[Image] = []
-	for f in files:
-		var tex: Texture2D = load(f)
-		var img := tex.get_image()
-		img.decompress()
-		img.convert(Image.FORMAT_RGB8)
-		img.generate_mipmaps()
-		images.append(img)
-	var arr := Texture2DArray.new()
-	if arr.create_from_images(images) != OK:
-		push_warning("[NIGHTLOOP] facade atlas: layer format mismatch")
-		return
-	for m in _wall_mats:
-		m.set_shader_parameter("facade_photos", arr)
-		m.set_shader_parameter("photo_layers", images.size())
-	print("[NIGHTLOOP] facade atlas: %d photo layers" % images.size())
 
 
 ## Time-of-day push (window lighting), from main's env hook. Street lamps
