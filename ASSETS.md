@@ -43,3 +43,4 @@ Notes:
 
 - **Marble007** (`godot/assets/textures/marble007.jpg`) — [ambientCG](https://ambientcg.com/view?id=Marble007), CC0. Used by the street-name plaque HUD.
 - **Barcelona street names** (`godot/barcelona/street_names.json`) — baked from OpenStreetMap via `godot/tools/bake_street_names.py`. **© OpenStreetMap contributors, ODbL** — same license and attribution as the tile data.
+- **Generic passenger car pack** ([skfb.ly/6sUFy](https://skfb.ly/6sUFy)) by [Comrade1280](https://sketchfab.com/comrade1280), licensed under [Creative Commons Attribution 4.0](http://creativecommons.org/licenses/by/4.0/). Planned for the traffic/parked-car fleet.
