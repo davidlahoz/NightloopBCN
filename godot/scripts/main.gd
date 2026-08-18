@@ -254,6 +254,24 @@ func _process(raw_dt: float) -> void:
 			_street_accum = 0.0
 			street_plaque.set_street(street_names.query(car.pos.x, car.pos.z))
 		street_plaque.update_plaque(dt)
+	if OS.get_cmdline_user_args().has("--matdump") and _frame == 100 and barcelona != null:
+		var counts := {}
+		var stack: Array[Node] = [barcelona]
+		while not stack.is_empty():
+			var n: Node = stack.pop_back()
+			for c in n.get_children():
+				stack.append(c)
+			if n is MeshInstance3D and n.mesh != null:
+				for si in n.mesh.get_surface_count():
+					var ov: Material = n.get_surface_override_material(si)
+					var act: Material = n.get_active_material(si)
+					var key := "%s | ov=%s | act=%s" % [
+						n.mesh.surface_get_material(si).resource_name if n.mesh.surface_get_material(si) else "null",
+						"yes" if ov != null else "NO",
+						act.get_class() if act != null else "null"]
+					counts[key] = counts.get(key, 0) + 1
+		for k in counts:
+			print("MATDUMP  %4d  %s" % [counts[k], k])
 	if OS.get_cmdline_user_args().has("--probe") and _frame % 120 == 0:
 		print("PROBE f=%d speed=%.1f cars=%d promoted=%d tick=%.2fms max=%.2fms graph=%s stuck=%d" % [
 			_frame, car.speed, TrafficManager.alive_count, TrafficManager.promoted_count,
