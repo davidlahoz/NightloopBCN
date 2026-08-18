@@ -16,8 +16,72 @@ var _ready := false
 var _names := PackedStringArray()      # per way
 var _seg_way := PackedInt32Array()     # per segment: way index
 var _seg := PackedFloat32Array()       # per segment: x0, z0, x1, z1
+var _way_start := PackedInt32Array()   # per way: first segment index
 var _grid: Dictionary = {}             # Vector2i cell -> PackedInt32Array of segment indices
+var _endpoints: Dictionary = {}        # quantized endpoint -> PackedInt32Array of way indices
 var _task_id := -1
+
+
+## --- road-network accessors (traffic reuses the same data) ---
+
+func is_ready() -> bool:
+	if not _ready and _task_id >= 0 and WorkerThreadPool.is_task_completed(_task_id):
+		WorkerThreadPool.wait_for_task_completion(_task_id)
+		_task_id = -1
+	return _ready
+
+
+func seg_count() -> int:
+	return _seg_way.size()
+
+
+func seg_a(i: int) -> Vector2:
+	return Vector2(_seg[i * 4], _seg[i * 4 + 1])
+
+
+func seg_b(i: int) -> Vector2:
+	return Vector2(_seg[i * 4 + 2], _seg[i * 4 + 3])
+
+
+func seg_way(i: int) -> int:
+	return _seg_way[i]
+
+
+func way_first_seg(wi: int) -> int:
+	return _way_start[wi]
+
+
+func way_last_seg(wi: int) -> int:
+	return (_way_start[wi + 1] if wi + 1 < _way_start.size() else seg_count()) - 1
+
+
+static func _endpoint_key(p: Vector2) -> Vector2i:
+	return Vector2i(roundi(p.x * 2.0), roundi(p.y * 2.0))   # 0.5 m quantization
+
+
+## Ways whose start or end touches point p (intersection connectivity).
+func ways_at_point(p: Vector2) -> PackedInt32Array:
+	return _endpoints.get(_endpoint_key(p), PackedInt32Array())
+
+
+func way_start_point(wi: int) -> Vector2:
+	return seg_a(way_first_seg(wi))
+
+
+func way_end_point(wi: int) -> Vector2:
+	return seg_b(way_last_seg(wi))
+
+
+## Segment indices registered in cells within `radius` of (x, z).
+func segments_near(x: float, z: float, radius: float) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var r := ceili(radius / CELL)
+	var cx := floori(x / CELL)
+	var cz := floori(z / CELL)
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			out.append_array(_grid.get(Vector2i(cx + dx, cz + dz), PackedInt32Array()))
+	return out
 
 
 static func available() -> bool:
@@ -42,10 +106,12 @@ func _build() -> void:
 	_seg_way.resize(seg_count)
 	_seg.resize(seg_count * 4)
 	_names.resize(streets.size())
+	_way_start.resize(streets.size())
 	var w := 0
 	for wi in streets.size():
 		var s: Array = streets[wi]
 		_names[wi] = s[0]
+		_way_start[wi] = w
 		var c: Array = s[1]
 		for i in range((c.size() >> 1) - 1):
 			var x0: float = c[i * 2]
@@ -67,6 +133,15 @@ func _build() -> void:
 					arr.append(w)
 					_grid[key] = arr
 			w += 1
+	# intersection connectivity: which ways meet at each endpoint
+	for wi in _names.size():
+		for p in [way_start_point(wi), way_end_point(wi)]:
+			var key := _endpoint_key(p)
+			if not _endpoints.has(key):
+				_endpoints[key] = PackedInt32Array()
+			var arr: PackedInt32Array = _endpoints[key]
+			arr.append(wi)
+			_endpoints[key] = arr
 	_ready = true
 
 

@@ -16,6 +16,12 @@ var toggle_mute := false
 
 ## Capture tooling can turn the mouse off entirely.
 var mouse_enabled := true
+## Capture mode: the physical keyboard is ignored and driving comes from the
+## scripted values below (a popped-up capture window steals focus, so real
+## keystrokes must never leak into a scripted run).
+var capture_mode := false
+var script_throttle := 0.0
+var script_steer := 0.0
 
 var _acc_dx := 0.0
 var _acc_dy := 0.0
@@ -78,19 +84,27 @@ func end_frame() -> void:
 
 
 var throttle: float:
-	get: return 1.0 if Input.is_action_pressed("throttle") else 0.0
+	get:
+		if capture_mode:
+			return script_throttle
+		return 1.0 if Input.is_action_pressed("throttle") else 0.0
 
 var brake: float:
-	get: return 1.0 if Input.is_action_pressed("brake") else 0.0
+	get:
+		if capture_mode:
+			return 0.0
+		return 1.0 if Input.is_action_pressed("brake") else 0.0
 
 ## A = +1, D = -1 (negated vs the JS demo — handedness, see header).
 var steer: float:
 	get:
+		if capture_mode:
+			return script_steer
 		return (1.0 if Input.is_action_pressed("steer_left") else 0.0) \
 			- (1.0 if Input.is_action_pressed("steer_right") else 0.0)
 
 var gliding: bool:
-	get: return Input.is_action_pressed("glide")
+	get: return not capture_mode and Input.is_action_pressed("glide")
 
 var handbrake: bool:
-	get: return Input.is_action_pressed("handbrake")
+	get: return not capture_mode and Input.is_action_pressed("handbrake")

@@ -40,6 +40,7 @@ var hud: Label
 var speedo: Speedo
 var street_names: StreetNames
 var street_plaque: StreetPlaque
+var traffic: TrafficSystem
 var _street_accum := 0.0
 var _trip_m := 0.0
 var _space: PhysicsDirectSpaceState3D
@@ -152,6 +153,8 @@ func _ready() -> void:
 		street_names = StreetNames.new()
 		street_plaque = StreetPlaque.new()
 		canvas.add_child(street_plaque)
+		traffic = TrafficSystem.new(street_names)
+		add_child(traffic)
 
 	# ---- prewarm the streamers around the spawn ----
 	if barcelona != null:
@@ -167,6 +170,7 @@ func _ready() -> void:
 	# captures it, Esc or losing focus releases it
 	if not _screenshot_path.is_empty():
 		input.mouse_enabled = false
+		input.capture_mode = true
 		# capture runs: vsync off; in movie-maker mode frames render at full
 		# speed even occluded, so keep the window out of the user's way there
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
@@ -195,15 +199,11 @@ func _process(raw_dt: float) -> void:
 	car.space = _space
 	if _spawn_heading_pending:
 		_try_spawn_heading()
-	# scripted-capture hooks (no real input events)
+	# scripted-capture hooks (bypass the real keyboard entirely)
 	if _drive_frames > 0:
-		if _frame < _drive_frames:
-			Input.action_press("throttle")
-		else:
-			Input.action_release("throttle")
-	if _steer_from >= 0:
-		if _frame >= _steer_from:
-			Input.action_press("steer_right")
+		input.script_throttle = 1.0 if _frame < _drive_frames else 0.0
+	if _steer_from >= 0 and _frame >= _steer_from:
+		input.script_steer = -1.0   # steer right
 	if _jump_sim != 0 and _frame == 5:
 		input.jump_key = _jump_sim
 	if not is_nan(_orbit_deg):
@@ -238,6 +238,8 @@ func _process(raw_dt: float) -> void:
 
 	if barcelona != null:
 		barcelona.update(dt, car.pos.x, car.pos.z)
+		if traffic != null:
+			traffic.update(dt, car.pos)
 	else:
 		ground.update(dt, car.pos.x, car.pos.z)
 		buildings.update(dt, car.pos.x, car.pos.z)
@@ -251,6 +253,14 @@ func _process(raw_dt: float) -> void:
 			_street_accum = 0.0
 			street_plaque.set_street(street_names.query(car.pos.x, car.pos.z))
 		street_plaque.update_plaque(dt)
+	if OS.get_cmdline_user_args().has("--probe") and _frame % 120 == 0:
+		var nearest := 1e9
+		if traffic != null:
+			for t in traffic._cars:
+				nearest = minf(nearest, Vector2(t.node.position.x - car.pos.x, t.node.position.z - car.pos.z).length())
+		print("PROBE f=%d speed=%.1f vz=%.2f vx=%.2f thr=%s cars=%d nearest=%.1f" % [
+			_frame, car.speed, car.vz, car.vx, Input.is_action_pressed("throttle"),
+			traffic._cars.size() if traffic != null else -1, nearest])
 	_update_hud(raw_dt)
 	_frame += 1
 	if not _screenshot_path.is_empty() and _frame == _shot_frame:
