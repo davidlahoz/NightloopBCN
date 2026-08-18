@@ -1,0 +1,249 @@
+extends Node3D
+## NIGHTLOOP — bootstrap + main loop. Port of src/main.js.
+##
+## Command-line user args (after `--`):
+##   --seed=N          pin a city (equivalent of ?seed=N)
+##   --state=N         boot time-of-day 1 day / 2 afternoon / 3 night
+##   --screenshot=PATH save a frame then quit (capture tooling)
+##   --shot-frame=N    frame to capture (default 45)
+##   --drive=N         hold throttle for the first N frames (capture tooling)
+##   --steer=N         hold right steer from frame N (capture tooling)
+##   --jump=K          simulate district-jump key K (6..9) on frame 5
+
+const SPAWN_X := 0.0
+const SPAWN_Z := -40.0
+const MAX_STEP := 1.0 / 30.0
+
+const JUMP_DISTRICTS := {
+	6: CityPlan.DISTRICT_DOWNTOWN,
+	7: CityPlan.DISTRICT_RESIDENTIAL,
+	8: CityPlan.DISTRICT_INDUSTRIAL,
+	9: CityPlan.DISTRICT_COUNTRYSIDE,
+}
+const DISTRICT_NAMES := ["downtown", "commercial", "residential", "industrial", "countryside"]
+
+var ctx := CityPlan.PlanCtx.new()
+var input := InputState.new()
+var car: Car
+var cam: ChaseCamera
+var ground: GroundChunks
+var buildings: Buildings
+var street_lights: StreetLights
+var env_ctrl: EnvironmentCtrl
+var audio: EngineAudio
+var ground_mat: ShaderMaterial
+var facade_mat: ShaderMaterial
+var hud: Label
+
+var _frame := 0
+var _screenshot_path := ""
+var _shot_frame := 45
+var _drive_frames := 0
+var _steer_from := -1
+var _jump_sim := 0
+var _fps_accum := 0.0
+var _fps_frames := 0
+var _fps := 0.0
+
+
+func _ready() -> void:
+	# ---- args + world seed ----
+	var boot_state := 3
+	var seed_arg := -1
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--seed="):
+			seed_arg = int(a.substr(7))
+		elif a.begins_with("--state="):
+			boot_state = clampi(int(a.substr(8)), 1, 3)
+		elif a.begins_with("--screenshot="):
+			_screenshot_path = a.substr(13)
+		elif a.begins_with("--shot-frame="):
+			_shot_frame = int(a.substr(13))
+		elif a.begins_with("--drive="):
+			_drive_frames = int(a.substr(8))
+		elif a.begins_with("--steer="):
+			_steer_from = int(a.substr(8))
+		elif a.begins_with("--jump="):
+			_jump_sim = int(a.substr(7))
+	CityPlan.world_seed = (seed_arg if seed_arg >= 0 else randi()) & 0xFFFFFFFF
+	print("[NIGHTLOOP] world seed %d — revisit this city with --seed=%d" % [CityPlan.world_seed, CityPlan.world_seed])
+
+	var t0 := Time.get_ticks_msec()
+
+	# ---- materials ----
+	ground_mat = ShaderMaterial.new()
+	ground_mat.shader = load("res://shaders/ground.gdshader")
+	ground_mat.set_shader_parameter("world_seed", CityPlan.world_seed)
+	facade_mat = ShaderMaterial.new()
+	facade_mat.shader = load("res://shaders/facade.gdshader")
+
+	# ---- world systems ----
+	env_ctrl = EnvironmentCtrl.new()
+	env_ctrl.apply_hook = _on_env_push
+	add_child(env_ctrl)
+	ground = GroundChunks.new(ground_mat)
+	add_child(ground)
+	buildings = Buildings.new(ctx, facade_mat)
+	add_child(buildings)
+	street_lights = StreetLights.new(ctx)
+	add_child(street_lights)
+
+	# ---- vehicle + camera + audio ----
+	car = Car.new(ctx)
+	car.pos = Vector3(SPAWN_X, 0.0, SPAWN_Z)
+	add_child(car)
+	cam = ChaseCamera.new(ctx)
+	add_child(cam)
+	audio = EngineAudio.new()
+	add_child(audio)
+
+	# ---- HUD ----
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	hud = Label.new()
+	hud.position = Vector2(14, 10)
+	hud.add_theme_font_size_override("font_size", 15)
+	hud.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95, 0.85))
+	canvas.add_child(hud)
+
+	# ---- prewarm the streamers around the spawn ----
+	buildings.prewarm(SPAWN_X, SPAWN_Z)
+	street_lights.prewarm(SPAWN_X, SPAWN_Z)
+	ground.prewarm(SPAWN_X, SPAWN_Z)
+	env_ctrl.jump_to(boot_state)
+	print("[NIGHTLOOP] prewarm %d ms" % (Time.get_ticks_msec() - t0))
+
+	if _screenshot_path.is_empty():
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	else:
+		input.mouse_enabled = false
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		return
+	input.handle_event(event)
+
+
+func _process(raw_dt: float) -> void:
+	var dt := minf(raw_dt, MAX_STEP)
+	# scripted-capture hooks (no real input events)
+	if _drive_frames > 0:
+		if _frame < _drive_frames:
+			Input.action_press("throttle")
+		else:
+			Input.action_release("throttle")
+	if _steer_from >= 0:
+		if _frame >= _steer_from:
+			Input.action_press("steer_right")
+	if _jump_sim != 0 and _frame == 5:
+		input.jump_key = _jump_sim
+	input.begin_frame()
+	if input.jump_key != 0:
+		_jump_to_district(input.jump_key)
+	if input.toggle_mute:
+		audio.muted = not audio.muted
+
+	car.road_wetness = env_ctrl.road_wetness
+	car.update(dt, input)
+	if car.curb_bump > 0.0:
+		cam.shake_energy = minf(1.0, cam.shake_energy + car.curb_bump)
+	cam.update(dt, car, input)
+	# bumper view: hide the car so no body panels clip into frame
+	car.set_body_visible(cam.mode != 1)
+
+	audio.update(dt, car, input)
+	env_ctrl.update(dt, input)
+
+	# per-frame physical surface + headlights
+	ground_mat.set_shader_parameter("wetness", env_ctrl.road_wetness)
+	ground_mat.set_shader_parameter("puddle_level", env_ctrl.road_puddles)
+	var hl := env_ctrl.headlights
+	car.headlight_l.light_energy = hl * 14.0
+	car.headlight_r.light_energy = hl * 14.0
+
+	input.end_frame()
+
+	ground.update(dt, car.pos.x, car.pos.z)
+	buildings.update(dt, car.pos.x, car.pos.z)
+	street_lights.update(dt, car.pos.x, car.pos.z)
+
+	_update_hud(raw_dt)
+	_frame += 1
+	if not _screenshot_path.is_empty() and _frame == _shot_frame:
+		var img := get_viewport().get_texture().get_image()
+		img.save_png(_screenshot_path)
+		print("[NIGHTLOOP] screenshot saved to ", _screenshot_path)
+		print("[NIGHTLOOP] dbg cam=%v car=%v orbit=(%.2f, %.2f) zoom=%.2f fov=%.1f" % [
+			cam.position, car.pos, cam.orbit_yaw, cam.orbit_pitch, cam.zoom, cam.fov])
+		get_tree().quit()
+
+
+func _update_hud(raw_dt: float) -> void:
+	_fps_accum += raw_dt
+	_fps_frames += 1
+	if _fps_accum >= 0.5:
+		_fps = _fps_frames / _fps_accum
+		_fps_accum = 0.0
+		_fps_frames = 0
+	var bx := floori((car.pos.x + CityPlan.warp_of(car.pos.x, car.pos.z).x) / CityPlan.PERIOD_X)
+	var bz := floori((car.pos.z + CityPlan.warp_of(car.pos.x, car.pos.z).y) / CityPlan.PERIOD_Z)
+	var district: int = CityPlan.district_of(bx, bz)
+	hud.text = "%3.0f km/h   %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump" % [
+		car.speed * 3.6, DISTRICT_NAMES[district], _fps, CityPlan.world_seed]
+
+
+## Teleport onto a street in the nearest macro cell of the target district.
+func _jump_to_district(key: int) -> void:
+	if not JUMP_DISTRICTS.has(key):
+		return
+	var target: int = JUMP_DISTRICTS[key]
+	var cmi := floori(car.pos.x / (CityPlan.PERIOD_X * 3.0))
+	var cmj := floori(car.pos.z / (CityPlan.PERIOD_Z * 3.0))
+	var best_mi := 0
+	var best_mj := 0
+	var found := false
+	for r in range(1, 25):
+		if found:
+			break
+		for mi in range(cmi - r, cmi + r + 1):
+			if found:
+				break
+			for mj in range(cmj - r, cmj + r + 1):
+				if maxi(absi(mi - cmi), absi(mj - cmj)) != r:
+					continue
+				if CityPlan.district_of(mi * 3 + 1, mj * 3 + 1) == target:
+					best_mi = mi
+					best_mj = mj
+					found = true
+					break
+	if not found:
+		return
+	var ix := best_mi * 3 + 1
+	var jz := best_mj * 3 + 1
+	var gx := (ix + 0.5) * CityPlan.PERIOD_X
+	var w := CityPlan.grid_to_world(gx, jz * CityPlan.PERIOD_Z - 2.2)
+	car.pos.x = w.x
+	car.pos.z = w.y
+	car.yaw = PI / 2.0 + CityPlan.street_yaw_delta(1, jz, gx)
+	car.vx = 0.0
+	car.vz = 0.0
+	car.yaw_rate = 0.0
+	car.drift_amount = 0.0
+	# snap the chase camera behind the car so it doesn't fly across the map
+	cam.follow_yaw = car.yaw
+	cam.position = Vector3(w.x - sin(car.yaw) * 7.0, car.pos.y + 3.0, w.y - cos(car.yaw) * 7.0)
+	# solid ground on arrival: prewarm the streamers
+	buildings.prewarm(w.x, w.y)
+	street_lights.prewarm(w.x, w.y)
+	ground.prewarm(w.x, w.y)
+
+
+func _on_env_push(params: Dictionary, _headlights: float) -> void:
+	facade_mat.set_shader_parameter("window_lit_fraction", params.window_lit_fraction)
+	facade_mat.set_shader_parameter("window_glow", 1.0 + params.neon_intensity * 2.0)
+	street_lights.set_intensity(params.streetlight_intensity)

@@ -1,5 +1,9 @@
 # NIGHTLOOP
 
+> **This branch (`godot-port`)** carries the Godot 4 port that turns the demo
+> into a proper game — see [`godot/PORT.md`](godot/PORT.md). The web demo
+> below is kept intact as the reference.
+
 A real-time graphics tech fully AI coded demo. You load in, roll out onto a wet city street at night, and drive — the city never ends. Either it looks AAA or you close the tab.
 
 ## What This Is
