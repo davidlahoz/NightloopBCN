@@ -34,6 +34,8 @@ var audio: EngineAudio
 var ground_mat: ShaderMaterial
 var facade_mat: ShaderMaterial
 var hud: Label
+var speedo: Speedo
+var _trip_m := 0.0
 
 var _frame := 0
 var _screenshot_path := ""
@@ -114,6 +116,8 @@ func _ready() -> void:
 	hud.add_theme_font_size_override("font_size", 15)
 	hud.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95, 0.85))
 	canvas.add_child(hud)
+	speedo = Speedo.new()
+	canvas.add_child(speedo)
 
 	# ---- prewarm the streamers around the spawn ----
 	buildings.prewarm(SPAWN_X, SPAWN_Z)
@@ -188,6 +192,8 @@ func _process(raw_dt: float) -> void:
 	buildings.update(dt, car.pos.x, car.pos.z)
 	street_lights.update(dt, car.pos.x, car.pos.z)
 
+	_trip_m += car.speed * dt
+	speedo.update_speed(dt, car.speed, _trip_m / 1000.0)
 	_update_hud(raw_dt)
 	_frame += 1
 	if not _screenshot_path.is_empty() and _frame == _shot_frame:
@@ -211,8 +217,8 @@ func _update_hud(raw_dt: float) -> void:
 	var district: int = CityPlan.district_of(bx, bz)
 	var mouse_hint := "Esc frees the mouse" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
 		else "click to capture the mouse"
-	hud.text = "%3.0f km/h   district: %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
-		car.speed * 3.6, DISTRICT_NAMES[district], _fps, CityPlan.world_seed, mouse_hint]
+	hud.text = "district: %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
+		DISTRICT_NAMES[district], _fps, CityPlan.world_seed, mouse_hint]
 
 
 ## Teleport onto a street in the nearest macro cell of the target district.
