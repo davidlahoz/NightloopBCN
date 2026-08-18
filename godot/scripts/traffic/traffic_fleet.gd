@@ -69,14 +69,12 @@ static func build_variants() -> Array:
 		var yaw := PI / 2.0 - 0.5 * atan2(2.0 * cxz, cxx - czz)
 		var frame := Transform3D(Basis(Vector3.UP, yaw), Vector3(centroid.x, 0.0, centroid.y))
 		var inv := frame.affine_inverse()
+		# normalise by BODY LENGTH along the forward axis (projection of the
+		# body AABB onto fwd) so every variant reads the same size class as
+		# the ~4.9 m hero car
 		var fwd2 := Vector2(sin(yaw), cos(yaw))
-		var pmin := INF
-		var pmax := -INF
-		for m in mine:
-			var proj := Vector2(m[1].center.x, m[1].center.z).dot(fwd2)
-			pmin = minf(pmin, proj)
-			pmax = maxf(pmax, proj)
-		var s := clampf(2.7 / maxf(pmax - pmin, 0.8), 0.55, 1.9)
+		var body_len: float = absf(bb.size.x * fwd2.x) + absf(bb.size.z * fwd2.y)
+		var s := clampf(4.65 / maxf(body_len, 1.5), 0.6, 2.2)
 
 		# template node (promoted visuals) + surface records (merged mesh)
 		var tpl := Node3D.new()

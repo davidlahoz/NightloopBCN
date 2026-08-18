@@ -114,6 +114,9 @@ func _process(dt: float) -> void:
 	var ppos: Vector3 = player.pos
 
 	_ensure_arrays()
+	if not _did_fill:
+		_did_fill = true
+		_initial_fill(ppos)
 	_sim(dt, ppos)
 	_do_transfers(ppos)
 	_spawn_accum += dt
@@ -361,8 +364,8 @@ func _spawn_despawn(ppos: Vector3) -> void:
 				_spawn_pool.append_array(graph.spawn_grid[key])
 	if _spawn_pool.is_empty():
 		return
-	var want := mini(target_population - alive_count, 14)
-	var tries := 240
+	var want := mini(target_population - alive_count, 20)
+	var tries := 300
 	while want > 0 and tries > 0:
 		tries -= 1
 		if _try_spawn(ppos):
@@ -370,8 +373,32 @@ func _spawn_despawn(ppos: Vector3) -> void:
 
 
 var _spawn_pool := PackedInt32Array()
+var _did_fill := false
 
-func _try_spawn(ppos: Vector3) -> bool:
+
+## Boot burst: fill the whole population at once with relaxed rules (any
+## direction, from 40 m out) so the city isn't empty for the first minute.
+func _initial_fill(ppos: Vector3) -> void:
+	_spawn_pool.clear()
+	var r := ceili(spawn_max / LaneGraph.GRID) + 1
+	var cc := Vector2i(floori(ppos.x / LaneGraph.GRID), floori(ppos.z / LaneGraph.GRID))
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			var key := Vector2i(cc.x + dx, cc.y + dz)
+			if graph.spawn_grid.has(key):
+				_spawn_pool.append_array(graph.spawn_grid[key])
+	if _spawn_pool.is_empty():
+		return
+	var want := target_population
+	var tries := 6000
+	while want > 0 and tries > 0:
+		tries -= 1
+		if _try_spawn(ppos, true):
+			want -= 1
+	print("[traffic] initial fill: %d cars" % alive_count)
+
+
+func _try_spawn(ppos: Vector3, relaxed := false) -> bool:
 	var lane := _spawn_pool[_rng.randi_range(0, _spawn_pool.size() - 1)]
 	# weight-accept so avenues fill before alleys
 	if _rng.randf() > clampf(graph.lane_spawn_weight[lane] / 2.0, 0.3, 1.0):
@@ -381,18 +408,19 @@ func _try_spawn(ppos: Vector3) -> bool:
 	var d := 0.0
 	var p := Vector3.ZERO
 	var ok := false
+	var lo := 40.0 if relaxed else spawn_min
 	for _k in 3:
 		d = _rng.randf() * maxf(graph.lane_length[lane] - car_length, 0.1)
 		p = graph.lane_pos(lane, d)
 		var dist_p := Vector2(p.x - ppos.x, p.z - ppos.z).length()
-		if dist_p >= spawn_min and dist_p <= spawn_max:
+		if dist_p >= lo and dist_p <= spawn_max:
 			ok = true
 			break
 	if not ok:
 		return false
-	# only lanes flowing toward the player
+	# only lanes flowing toward the player (any direction on the boot fill)
 	var tan := graph.lane_tangent(lane, d)
-	if tan.dot(Vector3(ppos.x - p.x, 0.0, ppos.z - p.z).normalized()) < 0.0:
+	if not relaxed and tan.dot(Vector3(ppos.x - p.x, 0.0, ppos.z - p.z).normalized()) < 0.0:
 		return false
 	# gap >= 2x IDM desired headway to every car already on the lane
 	var v0 := graph.lane_speed[lane]
@@ -558,7 +586,8 @@ func _update_elevation(_ppos: Vector3) -> void:
 		var q := PhysicsRayQueryParameters3D.create(
 			Vector3(p.x, c_y[ci] + 2.5, p.z), Vector3(p.x, c_y[ci] - 9.0, p.z))
 		var hit := space.intersect_ray(q)
-		if not hit.is_empty() and hit.position.y < c_y[ci] + 1.2:
+		if not hit.is_empty() and hit.position.y < c_y[ci] + 1.2 \
+				and hit.position.y > c_y[ci] - 2.5:
 			c_y[ci] = hit.position.y
 
 

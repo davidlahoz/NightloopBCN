@@ -397,4 +397,8 @@ func _bcn_ground(x: float, z: float, ref_y: float) -> float:
 	var y: float = hit.position.y
 	if y > ref_y + 1.2:
 		return ref_y   # ledge/wall top above wheel reach — not drivable
+	if y < ref_y - 2.5:
+		# collision gap (sidewalks/plazas without physics) or a tunnel floor
+		# far below: hold the current level instead of falling through
+		return ref_y
 	return y
