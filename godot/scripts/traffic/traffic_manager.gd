@@ -117,6 +117,7 @@ func _process(dt: float) -> void:
 	if not _did_fill:
 		_did_fill = true
 		_initial_fill(ppos)
+	_separation_pass(ppos)
 	_sim(dt, ppos)
 	_do_transfers(ppos)
 	_spawn_accum += dt
@@ -163,6 +164,60 @@ func _ensure_arrays() -> void:
 # Tier 1 sim
 # --------------------------------------------------------------------------
 var _transfers: Array[int] = []
+var _sep_gap := PackedFloat32Array()   # per car: nearest cross-lane obstacle ahead
+var _sep_hash: Dictionary = {}
+
+## Cross-lane separation for cars near the player: IDM only guards the same
+## lane, so junctions with missing right-of-way data let cars overlap.
+## A cheap 6 m spatial hash gives every visible car a "something is
+## physically ahead of me" gap regardless of lanes.
+func _separation_pass(ppos: Vector3) -> void:
+	if _sep_gap.size() != MAX_CARS:
+		_sep_gap.resize(MAX_CARS)
+	_sep_hash.clear()
+	var near := PackedInt32Array()
+	for ci in MAX_CARS:
+		_sep_gap[ci] = 1e9
+		if c_alive[ci] == 0:
+			continue
+		if Vector2(c_px[ci] - ppos.x, c_pz[ci] - ppos.z).length_squared() > 120.0 * 120.0:
+			continue
+		near.append(ci)
+		var key := Vector2i(floori(c_px[ci] / 6.0), floori(c_pz[ci] / 6.0))
+		if not _sep_hash.has(key):
+			_sep_hash[key] = PackedInt32Array()
+		var arr: PackedInt32Array = _sep_hash[key]
+		arr.append(ci)
+		_sep_hash[key] = arr
+	for ci in near:
+		var fx := sin(c_yaw[ci])
+		var fz := cos(c_yaw[ci])
+		var cx := floori(c_px[ci] / 6.0)
+		var cz := floori(c_pz[ci] / 6.0)
+		var best := 1e9
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var key := Vector2i(cx + dx, cz + dz)
+				if not _sep_hash.has(key):
+					continue
+				for cj in _sep_hash[key]:
+					if cj == ci or c_lane[cj] == c_lane[ci]:
+						continue   # same lane is IDM's job
+					var ax := c_px[cj] - c_px[ci]
+					var az := c_pz[cj] - c_pz[ci]
+					var along := ax * fx + az * fz
+					var lat := absf(ax * fz - az * fx)
+					if along > 0.3 and along < 8.0 and lat < 2.0:
+						best = minf(best, along - car_length * 0.6)
+		# the player car blocks traffic exactly like another car
+		var pax := ppos.x - c_px[ci]
+		var paz := ppos.z - c_pz[ci]
+		var palong := pax * fx + paz * fz
+		var plat := absf(pax * fz - paz * fx)
+		if palong > 0.3 and palong < 8.0 and plat < 2.2:
+			best = minf(best, palong - car_length * 0.6)
+		_sep_gap[ci] = maxf(best, 0.05)
+
 
 func _sim(dt: float, _ppos: Vector3) -> void:
 	_transfers.clear()
@@ -212,6 +267,11 @@ func _sim(dt: float, _ppos: Vector3) -> void:
 							c_wait[ci] = -60.0   # mercy window: stop holding for a while
 					else:
 						c_wait[ci] = minf(c_wait[ci], 0.0) + dt * 0.0
+
+			# cross-lane separation (near-player pass)
+			if _sep_gap.size() == MAX_CARS and _sep_gap[ci] < gap:
+				gap = _sep_gap[ci]
+				v_lead = 0.0
 
 			# IDM
 			var accel := IDM_A
@@ -511,6 +571,15 @@ func _update_promotion(ppos: Vector3) -> void:
 func _promote(ci: int) -> void:
 	if _variants.is_empty():
 		return
+	# physics bodies need REAL collision under the wheels — sidewalk/plaza
+	# cuts without physics would drop a VehicleBody3D into the abyss
+	var space := get_world_3d().direct_space_state
+	var pp := graph.lane_pos(c_lane[ci], c_dist[ci])
+	var q := PhysicsRayQueryParameters3D.create(
+		Vector3(pp.x, c_y[ci] + 2.0, pp.z), Vector3(pp.x, c_y[ci] - 3.0, pp.z))
+	var hit := space.intersect_ray(q)
+	if hit.is_empty():
+		return   # unsupported ground: stay kinematic (clamped and safe)
 	var vdef: Dictionary = _variants[c_variant[ci]]
 	var body := TrafficMVehicle.new()
 	body.mass = 1200.0
@@ -546,6 +615,11 @@ func _promote(ci: int) -> void:
 
 func _sync_promoted(ci: int, _dt: float) -> void:
 	var body: TrafficMVehicle = c_promoted[ci]
+	# fell through a collision gap, or flipped: back to the kinematic sim
+	if body.global_position.y < c_y[ci] - 3.0 or body.basis.y.dot(Vector3.UP) < 0.4:
+		_log_stuck(ci, c_lane[ci], "promoted body fell/flipped — demoted")
+		_demote(ci, false)
+		return
 	body.target_speed = c_speed[ci]
 	var look := minf(c_dist[ci] + 6.0 + c_speed[ci] * 0.5, graph.lane_length[c_lane[ci]])
 	var tp := graph.lane_pos(c_lane[ci], look)
