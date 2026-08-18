@@ -2,6 +2,8 @@ extends Node3D
 ## NIGHTLOOP — bootstrap + main loop. Port of src/main.js.
 ##
 ## Command-line user args (after `--`):
+##   --world=NAME      "barcelona" (real OSM tiles, default when the data is
+##                     present) or "procedural" (the endless NightLoop city)
 ##   --seed=N          pin a city (equivalent of ?seed=N)
 ##   --state=N         boot time-of-day 1 day / 2 afternoon / 3 night
 ##   --screenshot=PATH save a frame then quit (capture tooling)
@@ -29,6 +31,7 @@ var cam: ChaseCamera
 var ground: GroundChunks
 var buildings: Buildings
 var street_lights: StreetLights
+var barcelona: BarcelonaStreamer
 var env_ctrl: EnvironmentCtrl
 var audio: EngineAudio
 var ground_mat: ShaderMaterial
@@ -36,6 +39,8 @@ var facade_mat: ShaderMaterial
 var hud: Label
 var speedo: Speedo
 var _trip_m := 0.0
+var _space: PhysicsDirectSpaceState3D
+var _spawn_heading_pending := false
 
 var _frame := 0
 var _screenshot_path := ""
@@ -53,10 +58,13 @@ var _fps := 0.0
 
 func _ready() -> void:
 	# ---- args + world seed ----
-	var boot_state := 3
+	var boot_state := 0
 	var seed_arg := -1
+	var world_arg := ""
 	for a in OS.get_cmdline_user_args():
-		if a.begins_with("--seed="):
+		if a.begins_with("--world="):
+			world_arg = a.substr(8)
+		elif a.begins_with("--seed="):
 			seed_arg = int(a.substr(7))
 		elif a.begins_with("--state="):
 			boot_state = clampi(int(a.substr(8)), 1, 3)
@@ -79,6 +87,13 @@ func _ready() -> void:
 	CityPlan.world_seed = (seed_arg if seed_arg >= 0 else randi()) & 0xFFFFFFFF
 	print("[NIGHTLOOP] world seed %d — revisit this city with --seed=%d" % [CityPlan.world_seed, CityPlan.world_seed])
 
+	# world mode: Barcelona OSM tiles when the data ships, else procedural.
+	# Barcelona has no streetlights yet, so it boots at golden hour by default.
+	var use_barcelona := world_arg == "barcelona" or (world_arg.is_empty() and BarcelonaStreamer.available())
+	if boot_state == 0:
+		boot_state = 2 if use_barcelona else 3
+	print("[NIGHTLOOP] world: %s" % ("barcelona" if use_barcelona else "procedural"))
+
 	var t0 := Time.get_ticks_msec()
 
 	# ---- materials ----
@@ -92,19 +107,31 @@ func _ready() -> void:
 	env_ctrl = EnvironmentCtrl.new()
 	env_ctrl.apply_hook = _on_env_push
 	add_child(env_ctrl)
-	ground = GroundChunks.new(ground_mat)
-	add_child(ground)
-	buildings = Buildings.new(ctx, facade_mat)
-	add_child(buildings)
-	street_lights = StreetLights.new(ctx)
-	add_child(street_lights)
+	if use_barcelona:
+		barcelona = BarcelonaStreamer.new()
+		add_child(barcelona)
+	else:
+		ground = GroundChunks.new(ground_mat)
+		add_child(ground)
+		buildings = Buildings.new(ctx, facade_mat)
+		add_child(buildings)
+		street_lights = StreetLights.new(ctx)
+		add_child(street_lights)
 
 	# ---- vehicle + camera + audio ----
 	car = Car.new(ctx)
-	car.pos = Vector3(SPAWN_X, 0.0, SPAWN_Z)
+	# central Barcelona has roads straight through the origin
+	car.pos = Vector3(0.0, 0.5, 0.0) if use_barcelona else Vector3(SPAWN_X, 0.0, SPAWN_Z)
 	add_child(car)
 	cam = ChaseCamera.new(ctx)
 	add_child(cam)
+	if use_barcelona:
+		# mesh world: heights and walls come from the tile collision geometry
+		car.use_plan_colliders = false
+		car.ground_fn = _bcn_ground
+		cam.ground_fn = _bcn_ground
+		# face down the street once tile bodies are in the physics space
+		_spawn_heading_pending = true
 	audio = EngineAudio.new()
 	add_child(audio)
 
@@ -120,9 +147,12 @@ func _ready() -> void:
 	canvas.add_child(speedo)
 
 	# ---- prewarm the streamers around the spawn ----
-	buildings.prewarm(SPAWN_X, SPAWN_Z)
-	street_lights.prewarm(SPAWN_X, SPAWN_Z)
-	ground.prewarm(SPAWN_X, SPAWN_Z)
+	if barcelona != null:
+		barcelona.prewarm(car.pos.x, car.pos.z)
+	else:
+		buildings.prewarm(SPAWN_X, SPAWN_Z)
+		street_lights.prewarm(SPAWN_X, SPAWN_Z)
+		ground.prewarm(SPAWN_X, SPAWN_Z)
 	env_ctrl.jump_to(boot_state)
 	print("[NIGHTLOOP] prewarm %d ms" % (Time.get_ticks_msec() - t0))
 
@@ -130,6 +160,10 @@ func _ready() -> void:
 	# captures it, Esc or losing focus releases it
 	if not _screenshot_path.is_empty():
 		input.mouse_enabled = false
+		# capture runs: vsync off + always-on-top, else macOS App Naps the
+		# occluded window and scripted frames crawl at a few fps
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true)
 
 
 func _input(event: InputEvent) -> void:
@@ -149,6 +183,10 @@ func _notification(what: int) -> void:
 
 func _process(raw_dt: float) -> void:
 	var dt := minf(raw_dt, MAX_STEP)
+	_space = get_world_3d().direct_space_state
+	car.space = _space
+	if _spawn_heading_pending:
+		_try_spawn_heading()
 	# scripted-capture hooks (no real input events)
 	if _drive_frames > 0:
 		if _frame < _drive_frames:
@@ -163,7 +201,7 @@ func _process(raw_dt: float) -> void:
 	if not is_nan(_orbit_deg):
 		cam.orbit_yaw = deg_to_rad(_orbit_deg)
 	input.begin_frame()
-	if input.jump_key != 0:
+	if input.jump_key != 0 and barcelona == null:
 		_jump_to_district(input.jump_key)
 	if input.toggle_mute:
 		audio.muted = not audio.muted
@@ -188,9 +226,12 @@ func _process(raw_dt: float) -> void:
 
 	input.end_frame()
 
-	ground.update(dt, car.pos.x, car.pos.z)
-	buildings.update(dt, car.pos.x, car.pos.z)
-	street_lights.update(dt, car.pos.x, car.pos.z)
+	if barcelona != null:
+		barcelona.update(dt, car.pos.x, car.pos.z)
+	else:
+		ground.update(dt, car.pos.x, car.pos.z)
+		buildings.update(dt, car.pos.x, car.pos.z)
+		street_lights.update(dt, car.pos.x, car.pos.z)
 
 	_trip_m += car.speed * dt
 	speedo.update_speed(dt, car.speed, _trip_m / 1000.0)
@@ -212,11 +253,17 @@ func _update_hud(raw_dt: float) -> void:
 		_fps = _fps_frames / _fps_accum
 		_fps_accum = 0.0
 		_fps_frames = 0
+	var mouse_hint := "Esc frees the mouse" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+		else "click to capture the mouse"
+	if barcelona != null:
+		# the map-data attribution line is an ODbL license condition —
+		# it must stay visible in the credits/HUD
+		hud.text = "Barcelona\n%.0f fps\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · %s\nmap data %s" % [
+			_fps, mouse_hint, barcelona.attribution]
+		return
 	var bx := floori((car.pos.x + CityPlan.warp_of(car.pos.x, car.pos.z).x) / CityPlan.PERIOD_X)
 	var bz := floori((car.pos.z + CityPlan.warp_of(car.pos.x, car.pos.z).y) / CityPlan.PERIOD_Z)
 	var district: int = CityPlan.district_of(bx, bz)
-	var mouse_hint := "Esc frees the mouse" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
-		else "click to capture the mouse"
 	hud.text = "district: %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
 		DISTRICT_NAMES[district], _fps, CityPlan.world_seed, mouse_hint]
 
@@ -270,4 +317,52 @@ func _jump_to_district(key: int) -> void:
 func _on_env_push(params: Dictionary, _headlights: float) -> void:
 	facade_mat.set_shader_parameter("window_lit_fraction", params.window_lit_fraction)
 	facade_mat.set_shader_parameter("window_glow", 0.7 + params.neon_intensity * 1.2)
-	street_lights.set_intensity(params.streetlight_intensity)
+	if street_lights != null:
+		street_lights.set_intensity(params.streetlight_intensity)
+
+
+## Point the spawned car down the street: probe 16 headings and pick the one
+## with the longest run of flat road hits. Runs on the first frame where the
+## physics space actually sees the prewarmed tiles.
+func _try_spawn_heading() -> void:
+	var probe := PhysicsRayQueryParameters3D.create(
+		car.pos + Vector3(0, 3, 0), car.pos + Vector3(0, -6, 0))
+	if _space.intersect_ray(probe).is_empty():
+		return   # bodies not flushed into the space yet — retry next frame
+	_spawn_heading_pending = false
+	var best_yaw := 0.0
+	var best_score := -1.0
+	for i in 16:
+		var yaw := i * TAU / 16.0
+		var dirv := Vector3(sin(yaw), 0.0, cos(yaw))
+		var score := 0.0
+		for s: float in [6.0, 12.0, 18.0, 24.0, 30.0]:
+			var p := car.pos + dirv * s + Vector3(0, 3, 0)
+			var q := PhysicsRayQueryParameters3D.create(p, p + Vector3(0, -6, 0))
+			var hit := _space.intersect_ray(q)
+			if not hit.is_empty() and hit.normal.y > 0.9 and hit.position.y < 1.0:
+				score += 1.0
+			else:
+				break   # want a continuous stretch of road
+		if score > best_score:
+			best_score = score
+			best_yaw = yaw
+	car.yaw = best_yaw
+	cam.follow_yaw = best_yaw
+	cam.position = car.pos + Vector3(-sin(best_yaw) * 7.0, 3.0, -cos(best_yaw) * 7.0)
+
+
+## Ground under (x, z) for the mesh world: ray from just above the current
+## height downward, so the car follows its own level through bridges (+6)
+## and tunnels (-6) instead of snapping to the deck above.
+func _bcn_ground(x: float, z: float, ref_y: float) -> float:
+	if _space == null:
+		return ref_y
+	var q := PhysicsRayQueryParameters3D.create(
+		Vector3(x, ref_y + 2.5, z), Vector3(x, ref_y - 12.0, z))
+	var hit := _space.intersect_ray(q)
+	if hit.is_empty():
+		q = PhysicsRayQueryParameters3D.create(
+			Vector3(x, ref_y + 60.0, z), Vector3(x, ref_y - 60.0, z))
+		hit = _space.intersect_ray(q)
+	return hit.position.y if not hit.is_empty() else ref_y

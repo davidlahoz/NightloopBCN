@@ -4,6 +4,25 @@ The Babylon.js/WebGPU demo rebuilt as a Godot 4.7 project (Forward+), on the
 way to becoming a proper game. The web demo stays untouched at the repo root;
 everything Godot lives in `godot/`.
 
+## Worlds
+
+Two drivable worlds share the same car/camera/time-of-day systems:
+
+- **Barcelona** (`--world=barcelona`, default when the data is present) —
+  real OSM-derived city tiles streamed from `godot/barcelona/`
+  (`scripts/barcelona_streamer.gd`). ~2,270 tiles of 500 m, world-space
+  vertices instantiated at identity, collision baked into the glbs via the
+  `-col` mesh suffix. The car's ground/wall queries switch to physics
+  raycasts against the tile meshes (bridges +6 m and tunnels −6 m work by
+  following the car's own level). Placeholder materials are swapped in
+  `_apply_material_overrides` — replace them with real textured materials
+  there. **Map data © OpenStreetMap contributors (ODbL)** — the attribution
+  is shown in the in-game HUD and must stay there.
+  The tile data (~758 MB) is NOT committed; drop it at `godot/barcelona/`
+  (manifest.json + tiles/) and run a Godot import once.
+- **Procedural** (`--world=procedural`) — the endless seeded NightLoop city
+  described below.
+
 ## Run
 
 ```sh
