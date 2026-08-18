@@ -200,7 +200,7 @@ func _update_hud(raw_dt: float) -> void:
 	var district: int = CityPlan.district_of(bx, bz)
 	var mouse_hint := "Esc frees the mouse" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
 		else "click to capture the mouse"
-	hud.text = "%3.0f km/h   %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
+	hud.text = "%3.0f km/h   district: %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
 		car.speed * 3.6, DISTRICT_NAMES[district], _fps, CityPlan.world_seed, mouse_hint]
 
 
