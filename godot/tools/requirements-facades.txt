@@ -1,0 +1,9 @@
+# NightLoop Mapillary facade harvester (tools/facade_harvester.py)
+requests==2.32.4
+python-dotenv==1.2.3
+mapbox-vector-tile==2.2.0
+pyarrow==25.0.1
+shapely==2.1.2
+lxml==6.0.0
+numpy==2.1.2
+Pillow==11.0.0
