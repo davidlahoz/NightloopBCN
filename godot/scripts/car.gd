@@ -306,32 +306,41 @@ func update(dt: float, input: InputState) -> void:
 	_post_colliders(dt, cy, sy)
 
 
-## Mesh-world wall collision: a short ray along the travel direction at
-## bumper height; resolve like the plan's building-line pushback. Returns
-## the adjusted world velocity.
+## Mesh-world wall collision: a box the size of the body is tested against
+## the tile geometry every frame (works at zero speed and catches corners —
+## a single forward ray let the car creep into buildings and clip walls at
+## an angle). Contacts with mostly-vertical surfaces push the car out and
+## kill the inward velocity, like the plan's building-line pushback.
+static var _wall_shape: BoxShape3D = null
+
 func _mesh_wall_collide(dt: float, cy: float, sy: float, wvx: float, wvz: float) -> Vector2:
 	if space == null:
 		return Vector2(wvx, wvz)
-	var vlen := Vector2(wvx, wvz).length()
-	if vlen < 0.5:
+	if _wall_shape == null:
+		_wall_shape = BoxShape3D.new()
+		_wall_shape.size = Vector3(1.72, 0.7, 4.35)   # slightly under body size
+	var params := PhysicsShapeQueryParameters3D.new()
+	params.shape = _wall_shape
+	params.transform = Transform3D(Basis(Vector3.UP, yaw), pos + Vector3(0.0, 0.75, 0.0))
+	var rest := space.get_rest_info(params)
+	if rest.is_empty():
 		return Vector2(wvx, wvz)
-	var dirv := Vector3(wvx / vlen, 0.0, wvz / vlen)
-	var from := pos + Vector3(0.0, 0.55, 0.0)
-	var reach := 2.35 + vlen * dt
-	var q := PhysicsRayQueryParameters3D.create(from, from + dirv * reach)
-	var hit := space.intersect_ray(q)
-	if hit.is_empty():
-		return Vector2(wvx, wvz)
-	var n: Vector3 = hit.normal
-	if n.y > 0.5:
-		return Vector2(wvx, wvz)   # ramp/floor, not a wall
+	var n: Vector3 = rest.normal
+	if absf(n.y) > 0.5:
+		return Vector2(wvx, wvz)   # ramp/kerb/ceiling contact, not a wall
 	n.y = 0.0
 	if n.length() < 0.1:
 		return Vector2(wvx, wvz)
 	n = n.normalized()
-	var pen: float = reach - from.distance_to(hit.position)
-	pos.x += n.x * pen
-	pos.z += n.z * pen
+	# make sure the push points from the contact toward the car
+	var contact: Vector3 = rest.point
+	if (Vector3(pos.x - contact.x, 0.0, pos.z - contact.z)).dot(n) < 0.0:
+		n = -n
+	# no penetration depth from get_rest_info: push out a little each frame —
+	# reads as a firm, slightly springy wall
+	var push := minf(0.35, 0.10 + speed * dt)
+	pos.x += n.x * push
+	pos.z += n.z * push
 	var into := -(wvx * n.x + wvz * n.z)
 	if into > 0.0:
 		wvx += n.x * into * 1.35

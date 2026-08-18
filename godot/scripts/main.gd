@@ -354,7 +354,10 @@ func _try_spawn_heading() -> void:
 
 ## Ground under (x, z) for the mesh world: ray from just above the current
 ## height downward, so the car follows its own level through bridges (+6)
-## and tunnels (-6) instead of snapping to the deck above.
+## and tunnels (-6) instead of snapping to the deck above. A miss (streaming
+## gap, or a probe point inside a hollow building shell) HOLDS the current
+## level — never search from high above: that snapped wheels onto roofs and
+## made the car climb buildings.
 func _bcn_ground(x: float, z: float, ref_y: float) -> float:
 	if _space == null:
 		return ref_y
@@ -362,7 +365,8 @@ func _bcn_ground(x: float, z: float, ref_y: float) -> float:
 		Vector3(x, ref_y + 2.5, z), Vector3(x, ref_y - 12.0, z))
 	var hit := _space.intersect_ray(q)
 	if hit.is_empty():
-		q = PhysicsRayQueryParameters3D.create(
-			Vector3(x, ref_y + 60.0, z), Vector3(x, ref_y - 60.0, z))
-		hit = _space.intersect_ray(q)
-	return hit.position.y if not hit.is_empty() else ref_y
+		return ref_y
+	var y: float = hit.position.y
+	if y > ref_y + 1.2:
+		return ref_y   # ledge/wall top above wheel reach — not drivable
+	return y
