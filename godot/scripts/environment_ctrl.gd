@@ -83,17 +83,17 @@ func _init() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	env.glow_enabled = true
-	env.glow_intensity = 0.55
-	env.glow_bloom = 0.1
-	env.glow_hdr_threshold = 1.05
+	env.glow_intensity = 0.45
+	env.glow_bloom = 0.05
+	env.glow_hdr_threshold = 1.6
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
 	env.fog_aerial_perspective = 0.4
 	env.fog_sky_affect = 0.3
-	env.ssr_enabled = true
-	env.ssr_max_steps = 48
-	env.ssr_fade_in = 0.15
-	env.ssr_fade_out = 2.0
+	# SSR off: its edge-of-screen fallback smears the lit windows into milky
+	# blobs on the wet road. Real lights give the specular streaks instead;
+	# proper planar reflections are a later milestone (the demo used a mirror).
+	env.ssr_enabled = false
 	world_env = WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)

@@ -208,8 +208,11 @@ void fragment() {
 		}
 
 		// ---- wetness + puddles ----
+		// damp asphalt darkens but stays fairly rough — mirror gloss lives in
+		// the puddles, else SSR smears every lit window into milky blobs
 		albedo *= 1.0 - wetness * 0.45;
-		rough = mix(rough, 0.30, wetness * 0.8);
+		rough = mix(rough, 0.52, wetness * 0.8);
+		spec = mix(spec, 0.32, wetness);
 		float pn = fbm2(xz * 0.11 + 7.3);
 		// puddles collect toward the gutters, avoid the crown
 		float side = smoothstep(-3.4, -0.9, d);

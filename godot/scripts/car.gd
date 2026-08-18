@@ -71,6 +71,7 @@ var headlight_r: SpotLight3D
 var _model_wheels: Array = []      # from CarModel: {pivot, spin, base_pos, up, axle}
 var _fallback_wheels: Array = []   # procedural: {pivot, spin}
 var _tail_mats: Array = []
+var _head_mat: StandardMaterial3D = null
 var _ctx: CityPlan.PlanCtx
 
 
@@ -93,10 +94,13 @@ func _build_headlights() -> void:
 		var l := SpotLight3D.new()
 		l.position = Vector3(0.62 * side, 0.68, 2.05)
 		# aim forward (+Z model space): SpotLight3D shines along -Z of its basis
-		l.rotation = Vector3(deg_to_rad(-4.0), PI, 0.0)
+		l.rotation = Vector3(deg_to_rad(-6.5), PI, 0.0)
 		l.spot_range = 55.0
-		l.spot_angle = 34.0
-		l.spot_angle_attenuation = 1.3
+		l.spot_angle = 38.0
+		l.spot_angle_attenuation = 2.2
+		# diffuse pool only: full specular smears a milky glare blob across
+		# the wet asphalt whenever the camera faces the beams
+		l.light_specular = 0.08
 		l.light_color = Color(1.0, 0.93, 0.82)
 		l.light_energy = 0.0
 		l.shadow_enabled = false
@@ -169,12 +173,28 @@ func _try_load_model() -> void:
 	body_node.add_child(model.visual)
 	_model_wheels = model.wheels
 	_tail_mats = model.tail_mats
+	_head_mat = model.head_mat
 	if not _model_wheels.is_empty():
 		wheel_radius = _model_wheels[0].radius
+	# the beams originate at the model's actual lamp lenses, not guesses
+	if model.headlight_pos.size() == 2:
+		headlight_l.position = model.headlight_pos[0] + Vector3(0, 0, 0.06)
+		headlight_r.position = model.headlight_pos[1] + Vector3(0, 0, 0.06)
 
 
+## Bumper view hides the bodywork only — the headlights stay live.
 func set_body_visible(v: bool) -> void:
-	visible = v
+	body_node.visible = v
+	for w in _fallback_wheels:
+		w.pivot.visible = v
+
+
+## Drive beams and lens glow together from the weather's headlight value.
+func set_headlights(hl: float) -> void:
+	headlight_l.light_energy = hl * 5.0
+	headlight_r.light_energy = hl * 5.0
+	if _head_mat != null:
+		_head_mat.emission_energy_multiplier = hl * 2.2
 
 
 func update(dt: float, input: InputState) -> void:

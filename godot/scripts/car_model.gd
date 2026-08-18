@@ -168,7 +168,11 @@ static func build() -> Dictionary:
 	glass.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	var black_trim: StandardMaterial3D = mk.call(Color(0.02, 0.02, 0.022), 0.1, 0.55)
 	var rubber: StandardMaterial3D = mk.call(Color(0.015, 0.015, 0.016), 0.0, 0.92)
+	# front headlight lenses — emissive, driven by the headlight intensity
 	var white: StandardMaterial3D = mk.call(Color(0.75, 0.75, 0.73), 0.2, 0.5)
+	white.emission_enabled = true
+	white.emission = Color(1.0, 0.93, 0.82)
+	white.emission_energy_multiplier = 0.0
 	var tail: StandardMaterial3D = mk.call(Color(0.6, 0.02, 0.01), 0.0, 0.4)
 	tail.emission_enabled = true
 	tail.emission = Color(1.0, 0.08, 0.03)
@@ -185,6 +189,7 @@ static func build() -> Dictionary:
 		"Material.008": tail, "Material_008": tail,
 		"Material.002": rubber, "Material_002": rubber,
 	}
+	var lens_pts := PackedVector3Array()
 	stack = [glb_root]
 	while not stack.is_empty():
 		var n: Node = stack.pop_back()
@@ -194,6 +199,37 @@ static func build() -> Dictionary:
 			for si in n.mesh.get_surface_count():
 				var mat: Material = n.mesh.surface_get_material(si)
 				var mat_name: String = mat.resource_name if mat != null else ""
-				n.set_surface_override_material(si, by_name.get(mat_name, black_trim))
+				var rep: Material = by_name.get(mat_name, black_trim)
+				n.set_surface_override_material(si, rep)
+				if rep == white:
+					# collect the lens geometry (car frame) to place the real lights
+					var xf := _relative_transform(n, norm)
+					var verts: PackedVector3Array = n.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+					for v in verts:
+						var p: Vector3 = xf * v
+						if p.z > 0.5:   # front half only
+							lens_pts.append(p)
 
-	return {"visual": norm, "wheels": wheels, "tail_mats": [tail]}
+	# split the lens cloud into left/right lamp centres
+	var headlight_pos: Array = []
+	if lens_pts.size() >= 6:
+		var cx := 0.0
+		for p in lens_pts:
+			cx += p.x
+		cx /= lens_pts.size()
+		var lsum := Vector3.ZERO
+		var rsum := Vector3.ZERO
+		var ln := 0
+		var rn := 0
+		for p in lens_pts:
+			if p.x < cx:
+				lsum += p
+				ln += 1
+			else:
+				rsum += p
+				rn += 1
+		if ln > 0 and rn > 0:
+			headlight_pos = [lsum / ln, rsum / rn]
+
+	return {"visual": norm, "wheels": wheels, "tail_mats": [tail],
+		"head_mat": white, "headlight_pos": headlight_pos}

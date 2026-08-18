@@ -41,6 +41,9 @@ var _shot_frame := 45
 var _drive_frames := 0
 var _steer_from := -1
 var _jump_sim := 0
+var _orbit_deg := NAN
+var _hide_car := false
+var _no_beams := false
 var _fps_accum := 0.0
 var _fps_frames := 0
 var _fps := 0.0
@@ -65,6 +68,12 @@ func _ready() -> void:
 			_steer_from = int(a.substr(8))
 		elif a.begins_with("--jump="):
 			_jump_sim = int(a.substr(7))
+		elif a.begins_with("--orbit="):
+			_orbit_deg = float(a.substr(8))
+		elif a == "--hide-car":
+			_hide_car = true
+		elif a == "--no-beams":
+			_no_beams = true
 	CityPlan.world_seed = (seed_arg if seed_arg >= 0 else randi()) & 0xFFFFFFFF
 	print("[NIGHTLOOP] world seed %d — revisit this city with --seed=%d" % [CityPlan.world_seed, CityPlan.world_seed])
 
@@ -147,6 +156,8 @@ func _process(raw_dt: float) -> void:
 			Input.action_press("steer_right")
 	if _jump_sim != 0 and _frame == 5:
 		input.jump_key = _jump_sim
+	if not is_nan(_orbit_deg):
+		cam.orbit_yaw = deg_to_rad(_orbit_deg)
 	input.begin_frame()
 	if input.jump_key != 0:
 		_jump_to_district(input.jump_key)
@@ -167,9 +178,9 @@ func _process(raw_dt: float) -> void:
 	# per-frame physical surface + headlights
 	ground_mat.set_shader_parameter("wetness", env_ctrl.road_wetness)
 	ground_mat.set_shader_parameter("puddle_level", env_ctrl.road_puddles)
-	var hl := env_ctrl.headlights
-	car.headlight_l.light_energy = hl * 14.0
-	car.headlight_r.light_energy = hl * 14.0
+	car.set_headlights(0.0 if _no_beams else env_ctrl.headlights)
+	if _hide_car:
+		car.visible = false
 
 	input.end_frame()
 
@@ -252,5 +263,5 @@ func _jump_to_district(key: int) -> void:
 
 func _on_env_push(params: Dictionary, _headlights: float) -> void:
 	facade_mat.set_shader_parameter("window_lit_fraction", params.window_lit_fraction)
-	facade_mat.set_shader_parameter("window_glow", 1.0 + params.neon_intensity * 2.0)
+	facade_mat.set_shader_parameter("window_glow", 0.7 + params.neon_intensity * 1.2)
 	street_lights.set_intensity(params.streetlight_intensity)
