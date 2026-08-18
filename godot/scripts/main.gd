@@ -113,20 +113,25 @@ func _ready() -> void:
 	env_ctrl.jump_to(boot_state)
 	print("[NIGHTLOOP] prewarm %d ms" % (Time.get_ticks_msec() - t0))
 
-	if _screenshot_path.is_empty():
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	else:
+	# mouse starts free (so the window stays draggable); clicking the game
+	# captures it, Esc or losing focus releases it
+	if not _screenshot_path.is_empty():
 		input.mouse_enabled = false
 
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		else:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		return
+	if event is InputEventMouseButton and event.pressed \
+			and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and input.mouse_enabled:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	input.handle_event(event)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _process(raw_dt: float) -> void:
@@ -193,8 +198,10 @@ func _update_hud(raw_dt: float) -> void:
 	var bx := floori((car.pos.x + CityPlan.warp_of(car.pos.x, car.pos.z).x) / CityPlan.PERIOD_X)
 	var bz := floori((car.pos.z + CityPlan.warp_of(car.pos.x, car.pos.z).y) / CityPlan.PERIOD_Z)
 	var district: int = CityPlan.district_of(bx, bz)
-	hud.text = "%3.0f km/h   %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump" % [
-		car.speed * 3.6, DISTRICT_NAMES[district], _fps, CityPlan.world_seed]
+	var mouse_hint := "Esc frees the mouse" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+		else "click to capture the mouse"
+	hud.text = "%3.0f km/h   %s\n%.0f fps   seed %d\nWASD drive · Shift/RMB glide · Space handbrake · C camera · 1-3 time · 6-9 jump · %s" % [
+		car.speed * 3.6, DISTRICT_NAMES[district], _fps, CityPlan.world_seed, mouse_hint]
 
 
 ## Teleport onto a street in the nearest macro cell of the target district.

@@ -25,7 +25,9 @@ var _acc_wheel := 0.0
 ## Feed from _unhandled_input / _input.
 func handle_event(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
-		if not mouse_enabled:
+		# orbit only while captured — a free cursor crossing the window
+		# (e.g. heading for the title bar) must not spin the camera
+		if not mouse_enabled or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			return
 		# window focus/entry can deliver one huge relative jump — drop it
 		if event.relative.length() > 250.0:
