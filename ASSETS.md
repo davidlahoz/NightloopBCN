@@ -38,3 +38,8 @@ Notes:
   imported ones. The vendored GLB itself is unmodified.
 - The procedural fallback car remains in the codebase and is used if the
   GLB fails to load.
+
+## Godot / Barcelona edition
+
+- **Marble007** (`godot/assets/textures/marble007.jpg`) — [ambientCG](https://ambientcg.com/view?id=Marble007), CC0. Used by the street-name plaque HUD.
+- **Barcelona street names** (`godot/barcelona/street_names.json`) — baked from OpenStreetMap via `godot/tools/bake_street_names.py`. **© OpenStreetMap contributors, ODbL** — same license and attribution as the tile data.

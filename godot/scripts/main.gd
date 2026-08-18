@@ -38,6 +38,9 @@ var ground_mat: ShaderMaterial
 var facade_mat: ShaderMaterial
 var hud: Label
 var speedo: Speedo
+var street_names: StreetNames
+var street_plaque: StreetPlaque
+var _street_accum := 0.0
 var _trip_m := 0.0
 var _space: PhysicsDirectSpaceState3D
 var _spawn_heading_pending := false
@@ -145,6 +148,10 @@ func _ready() -> void:
 	canvas.add_child(hud)
 	speedo = Speedo.new()
 	canvas.add_child(speedo)
+	if use_barcelona and StreetNames.available():
+		street_names = StreetNames.new()
+		street_plaque = StreetPlaque.new()
+		canvas.add_child(street_plaque)
 
 	# ---- prewarm the streamers around the spawn ----
 	if barcelona != null:
@@ -238,6 +245,12 @@ func _process(raw_dt: float) -> void:
 
 	_trip_m += car.speed * dt
 	speedo.update_speed(dt, car.speed, _trip_m / 1000.0)
+	if street_names != null:
+		_street_accum += dt
+		if _street_accum >= 0.25:
+			_street_accum = 0.0
+			street_plaque.set_street(street_names.query(car.pos.x, car.pos.z))
+		street_plaque.update_plaque(dt)
 	_update_hud(raw_dt)
 	_frame += 1
 	if not _screenshot_path.is_empty() and _frame == _shot_frame:
