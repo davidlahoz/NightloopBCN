@@ -1,0 +1,146 @@
+Build me a Mapillary facade harvester in Python. It discovers, filters, and
+downloads 360° street-level imagery of Barcelona, then reprojects it into
+rectified straight-on facade crops I can turn into game textures.
+
+Context: I'm building a night driving game in Godot set in Barcelona. Building
+footprints already exist from the Spanish Cadastre (INSPIRE buildingpart GML,
+EPSG:25831) — read ./out/manifest.json for the world origin and CRS, and
+./work/ for the footprint data. Don't assume paths, look first.
+
+Write the stage skeleton, the config schema, and the on-disk layout FIRST.
+Show me that and wait for approval before implementing reprojection.
+
+═══ CREDENTIALS — DO THIS RIGHT ═══
+Read MAPILLARY_CLIENT_TOKEN from the environment, loaded from a .env file via
+python-dotenv. Add .env to .gitignore as your first action if it isn't there.
+Never hardcode it, never log it, never put it in a committed config file, and
+strip it from any URL you write to logs or the manifest.
+This tool needs ONLY the client token. It does not need the client secret or
+the auth URL — those are for the OAuth user-token flow, which read-only access
+to public imagery does not use. If you think you need them, stop and tell me
+why instead of adding them.
+Auth: client token as ?access_token= for tiles.mapillary.com, and as an
+"Authorization: OAuth <token>" header for graph.mapillary.com.
+
+═══ STAGE 1 — DISCOVER (vector tiles) ═══
+Do NOT use graph.mapillary.com/images?bbox= for discovery. Its limit caps at
+2000 with no pagination outside creator_username queries, so in a dense city it
+silently truncates. Use vector tiles.
+
+Endpoint: https://tiles.mapillary.com/maps/vtp/mly1_computed_public/2/14/{x}/{y}
+Use the COMPUTED endpoint, not mly1_public — raw GPS in Eixample street canyons
+is off by 10-20m, enough to attribute a photo to the wrong building. Computed
+geometries are SfM-corrected.
+
+Enumerate z14 tiles covering my bbox (default 1.95,41.28,2.30,41.52, override
+via CLI). Decode MVT with mapbox-vector-tile. From the "image" layer at z14
+collect: id, geometry, captured_at, compass_angle, is_pano, sequence_id,
+quality_score.
+
+Cache every tile response to ./work/mapillary/tiles/ and skip on re-run. Tile
+requests are limited to 50,000/day — I should never hit that, but caching means
+a crashed run doesn't re-spend the budget.
+
+Write ./work/mapillary/candidates.parquet. Print: tile count, total images,
+pano count, date range.
+
+═══ STAGE 2 — FILTER ═══
+Apply in this order, logging how many survive each step:
+
+1. is_pano == true. HARD REQUIREMENT, drop everything else.
+   Reason, so you don't "optimise" this away: perspective dashcam images face
+   down the street, putting facades at 70-80 degrees obliquity — they rectify
+   into a smeared mess. Equirectangular panos let me reproject a virtual camera
+   perpendicular to the facade. Non-pano images are worthless for this task.
+2. quality_score > 0.7 (configurable; null scores are dropped, not kept).
+3. captured_at within the last N years (default 6).
+4. Local time-of-day from captured_at in Europe/Madrid: reject before 10:00 and
+   after 17:00 local. Raking low-angle light bakes hard shadows into the albedo
+   and I can't remove those later.
+5. Dedupe within sequence_id: one drive yields hundreds of near-identical
+   frames. Keep at most one image per sequence per 25 m of travel.
+
+═══ STAGE 3 — MATCH TO FACADES ═══
+Load the Cadastre building footprints. For each footprint, extract edges that
+front a street (test against the OSM road geometry already in ./work/).
+
+For each street-facing edge:
+  - midpoint M, outward normal N
+  - find candidate panos within 8-30 m of M, on the outward side of the edge
+  - score by: distance to the ideal standoff (default 18 m), angle between
+    (camera -> M) and -N (want near 0, i.e. camera square to the facade), and
+    quality_score
+  - keep the top K (default 2)
+
+Reproject everything into EPSG:25831 for these distance calculations. Do NOT do
+geometry in degrees.
+
+Skip facades shorter than 4 m and any facade with no candidate — log both counts.
+
+═══ STAGE 4 — FETCH METADATA ═══
+Only for selected images. Batch via https://graph.mapillary.com?ids=ID1,ID2,...
+fields: id,thumb_2048_url,computed_geometry,computed_compass_angle,
+computed_rotation,camera_type,captured_at,creator,width,height
+
+Entity API allows 60,000 req/min so rate limits aren't the constraint, but add
+polite concurrency (default 8 workers) with exponential backoff on the
+"Application request limit reached" error (code 4).
+
+Treat thumb_2048_url as short-lived signed CDN links. Resolve and download in
+the same run — never persist a URL for a later session.
+
+═══ STAGE 5 — DOWNLOAD ═══
+*** Before downloading anything, print a plan: image count, estimated bytes    ***
+*** (assume 600 KB/image), and exit if --dry-run. I want to approve the volume ***
+*** before it starts. Expected range is 1.5-3 GB; if your plan says 200 GB,    ***
+*** the filters are broken — say so instead of downloading.                    ***
+
+Save to ./work/mapillary/raw/{image_id}.jpg. Resumable: skip existing files,
+verify size, retry partial downloads. This job must survive being killed.
+
+═══ STAGE 6 — REPROJECT (the actual deliverable) ═══
+For each (facade, pano) pair, extract a rectified perspective view:
+
+  - Treat the 2048x1024 equirectangular image as a sphere.
+  - Level it using computed_rotation (axis-angle, OpenSfM convention) so the
+    horizon is flat — skipping this leaves every facade tilted.
+  - Virtual camera yaw = bearing from computed_geometry to facade midpoint,
+    referenced to computed_compass_angle.
+  - Pitch upward so the facade is vertically centred: derive from the standoff
+    distance and the building height (I have heights from the Cadastre
+    numberOfFloorsAboveGround — use them, don't guess).
+  - Horizontal FOV to cover the facade width plus 10% margin, clamped to 90
+    degrees; wider than that and the edges distort badly.
+  - Output ./out/facades/{building_id}_{edge_index}_{image_id}.png
+
+Write ./out/facades/contact_sheet_{tile}.jpg — a grid of thumbnails per tile so
+I can eyeball a hundred results at once instead of opening files one by one.
+
+═══ STAGE 7 — MANIFEST ═══
+./out/facades/manifest.json, one record per output crop:
+  output filename, mapillary image_id, creator username, captured_at,
+  cadastre building reference, edge index, standoff distance, incidence angle,
+  quality_score, reprojection parameters used.
+
+Also write ./out/facades/ATTRIBUTION.md: the CC BY-SA 4.0 credit block listing
+every contributing username with links. Mapillary imagery is CC BY-SA, which is
+share-alike — the manifest is how I later identify which textures are
+licence-encumbered if I want to replace them with owned art.
+
+═══ REQUIREMENTS ═══
+- Single script, argparse, pinned requirements.txt.
+- --tiles X,Y to run exactly one z14 tile. I will test on one Eixample tile
+  before running the city.
+- --dry-run at every stage, not just download.
+- Every stage writes its output to disk and skips if already present. I want to
+  re-run stage 6 with different reprojection params without re-downloading.
+- Structured progress with counts and timings per stage.
+- Log every rejected candidate with image_id and the specific filter that killed
+  it, to ./work/mapillary/rejected.csv. When the yield is bad I need to know
+  which filter is too tight.
+
+═══ FIRST TEST, DO THIS BEFORE ANYTHING ELSE ═══
+Run one z14 tile over the Eixample end to end and show me the contact sheet.
+If the crops are looking down the street rather than at buildings, the bearing
+or the compass reference is wrong. If they're tilted, computed_rotation isn't
+being applied. Twenty images will tell us both in thirty seconds.

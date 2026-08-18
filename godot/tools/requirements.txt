@@ -1,0 +1,5 @@
+# NightLoop lane-graph builder (tools/build_lane_graph.py)
+# eclipse-sumo ships the netconvert binary; osmium is used as a CLI
+# (brew install osmium-tool) and is checked at runtime.
+eclipse-sumo==1.27.1
+lxml==6.0.0

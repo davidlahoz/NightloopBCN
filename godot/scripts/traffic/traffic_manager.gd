@@ -1,0 +1,720 @@
+extends Node3D
+## TrafficManager (autoload) — ambient traffic over the offline lane graph.
+##
+## Tier 1: cars are rows in flat arrays advanced kinematically along lane
+## polylines with IDM car-following; visuals are per-variant MultiMeshes.
+## Tier 0: the nearest cars are promoted to TrafficMVehicle physics bodies
+## (M.A.V.S VehicleBody3D controller driven by IDM intent).
+## Night LOD: beyond mesh_distance a car is only a pair of emissive light
+## quads; a small pool of real SpotLight3Ds serves the nearest cars.
+##
+## Idle until setup(player, world) is called (Barcelona mode only).
+
+# ---- exported tuning ----
+@export var target_population := 220
+@export var spawn_min := 150.0
+@export var spawn_max := 250.0
+@export var despawn_radius := 350.0
+@export var promote_radius := 60.0
+@export var demote_radius := 75.0
+@export var max_promoted := 12
+@export var mesh_distance := 80.0     # past this: light quads only
+@export var headlight_pool := 6      # real SpotLight3D cones
+@export var car_length := 4.5
+
+# IDM
+const IDM_T := 1.2
+const IDM_A := 1.5
+const IDM_B := 2.0
+const IDM_S0 := 2.0
+const JUNCTION_LOOK := 25.0
+const TTC_LIMIT := 3.0
+const STUCK_SECONDS := 15.0
+const MAX_CARS := 400
+
+const CH_G := 71   # 'G' protected green
+const CH_g := 103  # 'g' permissive
+const CH_y := 121
+const CH_r := 114
+
+var graph := LaneGraph.new()
+var player: Node = null           # anything with .pos (the Car)
+var enabled := false
+
+# ---- car SoA ----
+var c_lane := PackedInt32Array()
+var c_dist := PackedFloat32Array()
+var c_speed := PackedFloat32Array()
+var c_v0 := PackedFloat32Array()      # desired-speed factor (jitter)
+var c_T := PackedFloat32Array()       # headway jitter
+var c_next := PackedInt32Array()      # chosen connection, -1 undecided
+var c_exit := PackedInt32Array()      # connection being traversed on a via lane
+var c_y := PackedFloat32Array()
+var c_yaw := PackedFloat32Array()
+var c_variant := PackedInt32Array()
+var c_wait := PackedFloat32Array()
+var c_alive := PackedByteArray()
+var c_promoted: Array = []            # TrafficMVehicle or null
+var _free: Array[int] = []
+var alive_count := 0
+var promoted_count := 0
+
+var _lane_cars: Dictionary = {}       # lane -> PackedInt32Array sorted by dist asc
+var c_px := PackedFloat32Array()      # world position cache (written by visuals,
+var c_pz := PackedFloat32Array()      # reused by despawn/promotion checks)
+var _xf_cache: Array[Transform3D] = []
+var _time := 0.0
+var _spawn_accum := 0.0
+var _promo_accum := 0.0
+var _ray_cursor := 0
+var _rng := RandomNumberGenerator.new()
+
+# visuals
+var _variants: Array = []             # {mesh: ArrayMesh, wheel_r, template: Node3D}
+var _mm_cars: Array = []              # MultiMeshInstance3D per variant
+var _mm_lights: MultiMeshInstance3D
+var _spots: Array[SpotLight3D] = []
+
+# debug
+var overlay: Label
+var debug_lanes := false
+var _debug_mesh: MeshInstance3D
+var _debug_accum := 0.0
+var tick_ms := 0.0
+var tick_ms_max := 0.0
+var stuck_log: Array[String] = []     # rolling, newest last
+
+
+func setup(p_player: Node) -> void:
+	player = p_player
+	_rng.randomize()
+	debug_lanes = OS.get_cmdline_user_args().has("--lanes")
+	WorkerThreadPool.add_task(func(): graph.load_bin(), false, "nl_lane_graph")
+	_build_visual_pools()
+	_build_overlay()
+	enabled = true
+
+
+func _ready() -> void:
+	set_process(true)
+
+
+func _input(event: InputEvent) -> void:
+	if enabled and event is InputEventKey and event.pressed and event.keycode == KEY_T:
+		debug_lanes = not debug_lanes
+		if not debug_lanes and _debug_mesh != null:
+			_debug_mesh.mesh = ImmediateMesh.new()
+
+
+func _process(dt: float) -> void:
+	if not enabled or player == null or not graph.ready:
+		return
+	var t0 := Time.get_ticks_usec()
+	_time += dt
+	var ppos: Vector3 = player.pos
+
+	_ensure_arrays()
+	_sim(dt, ppos)
+	_do_transfers(ppos)
+	_spawn_accum += dt
+	if _spawn_accum >= 0.4:
+		_spawn_accum = 0.0
+		_spawn_despawn(ppos)
+	_promo_accum += dt
+	if _promo_accum >= 0.3:
+		_promo_accum = 0.0
+		_update_promotion(ppos)
+	_update_elevation(ppos)
+	_update_visuals(dt, ppos)
+	if debug_lanes:
+		_debug_accum += dt
+		if _debug_accum > 0.5:
+			_debug_accum = 0.0
+			_draw_debug_lanes(ppos)
+
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0
+	tick_ms = lerpf(tick_ms, ms, 0.1)
+	tick_ms_max = maxf(tick_ms_max * 0.995, ms)
+	if overlay != null:
+		overlay.text = "traffic %d cars · %d promoted · %.2f ms (max %.2f)%s" % [
+			alive_count, promoted_count, tick_ms, tick_ms_max,
+			("\n" + stuck_log[-1]) if not stuck_log.is_empty() else ""]
+
+
+func _ensure_arrays() -> void:
+	if c_lane.size() == MAX_CARS:
+		return
+	c_lane.resize(MAX_CARS); c_dist.resize(MAX_CARS); c_speed.resize(MAX_CARS)
+	c_v0.resize(MAX_CARS); c_T.resize(MAX_CARS); c_next.resize(MAX_CARS)
+	c_exit.resize(MAX_CARS); c_y.resize(MAX_CARS); c_yaw.resize(MAX_CARS)
+	c_variant.resize(MAX_CARS); c_wait.resize(MAX_CARS)
+	c_px.resize(MAX_CARS); c_pz.resize(MAX_CARS)
+	_xf_cache.resize(MAX_CARS)
+	c_alive.resize(MAX_CARS)
+	c_promoted.resize(MAX_CARS)
+	for i in range(MAX_CARS - 1, -1, -1):
+		_free.append(i)
+
+
+# --------------------------------------------------------------------------
+# Tier 1 sim
+# --------------------------------------------------------------------------
+var _transfers: Array[int] = []
+
+func _sim(dt: float, _ppos: Vector3) -> void:
+	_transfers.clear()
+	for lane_key in _lane_cars.keys():
+		var arr: PackedInt32Array = _lane_cars[lane_key]
+		var lane := lane_key as int
+		var llen := graph.lane_length[lane]
+		var lspeed := graph.lane_speed[lane]
+		for i in arr.size():
+			var ci := arr[i]
+			if c_promoted[ci] != null:
+				_sync_promoted(ci, dt)
+			var v := c_speed[ci]
+			var v0 := lspeed * c_v0[ci]
+			var gap := 1e9
+			var v_lead := v0
+
+			# leader in this lane
+			if i + 1 < arr.size():
+				var li := arr[i + 1]
+				gap = c_dist[li] - c_dist[ci] - car_length
+				v_lead = c_speed[li]
+			else:
+				# look across the boundary into the chosen next lane
+				var remaining := llen - c_dist[ci]
+				var nxt := _peek_next_lane(ci, lane)
+				if nxt >= 0 and _lane_cars.has(nxt):
+					var narr: PackedInt32Array = _lane_cars[nxt]
+					if narr.size() > 0:
+						var li2 := narr[0]
+						gap = remaining + c_dist[li2] - car_length
+						v_lead = c_speed[li2]
+
+			# junction gate on normal lanes
+			if graph.lane_flags[lane] & 1 == 0:
+				var remaining2 := llen - c_dist[ci]
+				if remaining2 < JUNCTION_LOOK:
+					var hold := _junction_hold(ci, lane, remaining2)
+					if hold:
+						var stop_gap := maxf(remaining2 - 1.2, 0.05)
+						if stop_gap < gap:
+							gap = stop_gap
+							v_lead = 0.0
+						c_wait[ci] += dt
+						if c_wait[ci] > STUCK_SECONDS:
+							_log_stuck(ci, lane, "held %ds at junction, forcing through" % int(c_wait[ci]))
+							c_wait[ci] = -60.0   # mercy window: stop holding for a while
+					else:
+						c_wait[ci] = minf(c_wait[ci], 0.0) + dt * 0.0
+
+			# IDM
+			var accel := IDM_A
+			if gap < 1e8:
+				var delta_v := v - v_lead
+				var s_star := IDM_S0 + maxf(0.0, v * (IDM_T * c_T[ci]) + (v * delta_v) / (2.0 * sqrt(IDM_A * IDM_B)))
+				accel = IDM_A * (1.0 - pow(v / maxf(v0, 0.1), 4.0) - pow(s_star / maxf(gap, 0.2), 2.0))
+			else:
+				accel = IDM_A * (1.0 - pow(v / maxf(v0, 0.1), 4.0))
+			v = maxf(v + accel * dt, 0.0)
+			c_speed[ci] = v
+			c_dist[ci] += v * dt
+			if v > 1.0:
+				c_wait[ci] = maxf(c_wait[ci], 0.0) if c_wait[ci] > -1.0 else c_wait[ci] + dt
+				if c_wait[ci] > 0.0:
+					c_wait[ci] = 0.0
+			if c_dist[ci] >= llen:
+				_transfers.append(ci)
+
+
+func _peek_next_lane(ci: int, lane: int) -> int:
+	if graph.lane_flags[lane] & 1 != 0:
+		# on a via lane: destination is the exit connection's to-lane
+		var ex := c_exit[ci]
+		return graph.conn_to[ex] if ex >= 0 else -1
+	var cn := _choose_conn(ci, lane)
+	if cn < 0:
+		return -1
+	var via := graph.conn_via[cn]
+	return via if via >= 0 else graph.conn_to[cn]
+
+
+func _choose_conn(ci: int, lane: int) -> int:
+	if c_next[ci] >= 0:
+		return c_next[ci]
+	var s0 := graph.lane_succ_start[lane]
+	var s1 := graph.lane_succ_start[lane + 1]
+	if s1 <= s0:
+		return -1
+	# weighted-random route choice; no destination, no pathfinding
+	var total := 0.0
+	for s in range(s0, s1):
+		total += _conn_weight(graph.succ_conn[s])
+	var r := _rng.randf() * maxf(total, 0.001)
+	for s in range(s0, s1):
+		r -= _conn_weight(graph.succ_conn[s])
+		if r <= 0.0:
+			c_next[ci] = graph.succ_conn[s]
+			return c_next[ci]
+	c_next[ci] = graph.succ_conn[s1 - 1]
+	return c_next[ci]
+
+
+func _conn_weight(cn: int) -> float:
+	var to := graph.conn_to[cn]
+	return maxf(graph.lane_spawn_weight[to], 0.15)
+
+
+func _junction_hold(ci: int, lane: int, remaining: float) -> bool:
+	if c_wait[ci] < -1.0:
+		return false   # mercy window after a logged stuck hold
+	var cn := _choose_conn(ci, lane)
+	if cn < 0:
+		return false
+	var sig := graph.signal_state(cn, _time)
+	if sig == CH_r or sig == CH_y:
+		return true
+	if sig == CH_G:
+		return false   # protected green: signal already separates conflicts
+	# permissive / uncontrolled: gap acceptance against precomputed conflicts
+	if remaining > 12.0:
+		return false
+	var x0 := graph.conn_conflict_start[cn]
+	var x1 := graph.conn_conflict_start[cn + 1]
+	var stalled_only := true
+	var blocked := false
+	for x in range(x0, x1):
+		var oc := graph.conflicts[x]
+		var via := graph.conn_via[oc]
+		if via >= 0 and _lane_cars.has(via):
+			var varr: PackedInt32Array = _lane_cars[via]
+			for vi in varr:
+				blocked = true
+				if c_speed[vi] > 0.4:
+					stalled_only = false
+		var from := graph.conn_from[oc]
+		if _lane_cars.has(from):
+			var farr: PackedInt32Array = _lane_cars[from]
+			if farr.size() > 0:
+				var li := farr[farr.size() - 1]   # nearest to its junction
+				var lv := maxf(c_speed[li], 0.1)
+				if (graph.lane_length[from] - c_dist[li]) / lv < TTC_LIMIT:
+					blocked = true
+					stalled_only = false
+	if blocked and stalled_only and c_wait[ci] > 4.0:
+		return false   # deadlock breaker: every blocker is itself stopped
+	return blocked
+
+
+func _do_transfers(ppos: Vector3) -> void:
+	for ci in _transfers:
+		if c_alive[ci] == 0:
+			continue
+		var lane := c_lane[ci]
+		var overflow := c_dist[ci] - graph.lane_length[lane]
+		var next_lane := -1
+		if graph.lane_flags[lane] & 1 != 0:
+			var ex := c_exit[ci]
+			next_lane = graph.conn_to[ex] if ex >= 0 else -1
+			c_exit[ci] = -1
+		else:
+			var cn := _choose_conn(ci, lane)
+			if cn >= 0:
+				var via := graph.conn_via[cn]
+				if via >= 0:
+					next_lane = via
+					c_exit[ci] = cn
+				else:
+					next_lane = graph.conn_to[cn]
+			c_next[ci] = -1
+		if next_lane < 0:
+			_log_stuck(ci, lane, "dead end, despawned")
+			_despawn(ci)
+			continue
+		_lane_remove(lane, ci)
+		c_lane[ci] = next_lane
+		c_dist[ci] = minf(overflow, maxf(graph.lane_length[next_lane] - 0.1, 0.0))
+		_lane_insert(next_lane, ci)
+
+
+# --------------------------------------------------------------------------
+# spawn / despawn
+# --------------------------------------------------------------------------
+func _spawn_despawn(ppos: Vector3) -> void:
+	# despawn far cars (position cache from the visuals pass)
+	for ci in MAX_CARS:
+		if c_alive[ci] == 0:
+			continue
+		if Vector2(c_px[ci] - ppos.x, c_pz[ci] - ppos.z).length() > despawn_radius:
+			_despawn(ci)
+	# spawn toward target population from a pooled candidate list (annulus
+	# cells collected once per tick — random cell probing rejected ~97%)
+	_spawn_pool.clear()
+	var r := ceili(spawn_max / LaneGraph.GRID) + 1
+	var cc := Vector2i(floori(ppos.x / LaneGraph.GRID), floori(ppos.z / LaneGraph.GRID))
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			var key := Vector2i(cc.x + dx, cc.y + dz)
+			if graph.spawn_grid.has(key):
+				_spawn_pool.append_array(graph.spawn_grid[key])
+	if _spawn_pool.is_empty():
+		return
+	var want := mini(target_population - alive_count, 14)
+	var tries := 240
+	while want > 0 and tries > 0:
+		tries -= 1
+		if _try_spawn(ppos):
+			want -= 1
+
+
+var _spawn_pool := PackedInt32Array()
+
+func _try_spawn(ppos: Vector3) -> bool:
+	var lane := _spawn_pool[_rng.randi_range(0, _spawn_pool.size() - 1)]
+	# weight-accept so avenues fill before alleys
+	if _rng.randf() > clampf(graph.lane_spawn_weight[lane] / 2.0, 0.3, 1.0):
+		return false
+	# a few distance samples per attempt: most of a candidate lane can lie
+	# outside the annulus even when part of it is inside
+	var d := 0.0
+	var p := Vector3.ZERO
+	var ok := false
+	for _k in 3:
+		d = _rng.randf() * maxf(graph.lane_length[lane] - car_length, 0.1)
+		p = graph.lane_pos(lane, d)
+		var dist_p := Vector2(p.x - ppos.x, p.z - ppos.z).length()
+		if dist_p >= spawn_min and dist_p <= spawn_max:
+			ok = true
+			break
+	if not ok:
+		return false
+	# only lanes flowing toward the player
+	var tan := graph.lane_tangent(lane, d)
+	if tan.dot(Vector3(ppos.x - p.x, 0.0, ppos.z - p.z).normalized()) < 0.0:
+		return false
+	# gap >= 2x IDM desired headway to every car already on the lane
+	var v0 := graph.lane_speed[lane]
+	var need := 2.0 * (IDM_S0 + v0 * IDM_T) + car_length
+	if _lane_cars.has(lane):
+		for oc in _lane_cars[lane]:
+			if absf(c_dist[oc] - d) < need:
+				return false
+	if _free.is_empty():
+		return false
+	var ci: int = _free.pop_back()
+	c_alive[ci] = 1
+	c_lane[ci] = lane
+	c_dist[ci] = d
+	c_speed[ci] = v0 * 0.6
+	c_v0[ci] = _rng.randf_range(0.88, 1.12)
+	c_T[ci] = _rng.randf_range(0.88, 1.12)
+	c_next[ci] = -1
+	c_exit[ci] = -1
+	c_y[ci] = ppos.y
+	c_yaw[ci] = atan2(tan.x, tan.z)
+	c_variant[ci] = _rng.randi_range(0, maxi(_variants.size() - 1, 0))
+	c_wait[ci] = 0.0
+	c_promoted[ci] = null
+	c_px[ci] = p.x
+	c_pz[ci] = p.z
+	_xf_cache[ci] = Transform3D(Basis(Vector3.UP, c_yaw[ci]), Vector3(p.x, c_y[ci], p.z))
+	_lane_insert(lane, ci)
+	alive_count += 1
+	return true
+
+
+func _despawn(ci: int) -> void:
+	if c_alive[ci] == 0:
+		return
+	if c_promoted[ci] != null:
+		_demote(ci, false)
+	_lane_remove(c_lane[ci], ci)
+	c_alive[ci] = 0
+	_free.append(ci)
+	alive_count -= 1
+
+
+func _lane_insert(lane: int, ci: int) -> void:
+	var arr: PackedInt32Array = _lane_cars.get(lane, PackedInt32Array())
+	var pos := arr.size()
+	for i in arr.size():
+		if c_dist[arr[i]] > c_dist[ci]:
+			pos = i
+			break
+	arr.insert(pos, ci)
+	_lane_cars[lane] = arr
+
+
+func _lane_remove(lane: int, ci: int) -> void:
+	if not _lane_cars.has(lane):
+		return
+	var arr: PackedInt32Array = _lane_cars[lane]
+	var i := arr.find(ci)
+	if i >= 0:
+		arr.remove_at(i)
+	if arr.is_empty():
+		_lane_cars.erase(lane)
+	else:
+		_lane_cars[lane] = arr
+
+
+# --------------------------------------------------------------------------
+# Tier 0 — promotion to M.A.V.S physics bodies
+# --------------------------------------------------------------------------
+func _update_promotion(ppos: Vector3) -> void:
+	var near: Array = []
+	for ci in MAX_CARS:
+		if c_alive[ci] == 0:
+			continue
+		var d := Vector2(c_px[ci] - ppos.x, c_pz[ci] - ppos.z).length()
+		if c_promoted[ci] != null and d > demote_radius:
+			_demote(ci, true)
+		elif c_promoted[ci] == null and d < promote_radius:
+			near.append([d, ci])
+	near.sort()
+	for e in near:
+		if promoted_count >= max_promoted:
+			break
+		_promote(e[1])
+
+
+func _promote(ci: int) -> void:
+	if _variants.is_empty():
+		return
+	var vdef: Dictionary = _variants[c_variant[ci]]
+	var body := TrafficMVehicle.new()
+	body.mass = 1200.0
+	var pos := graph.lane_pos(c_lane[ci], c_dist[ci])
+	var tan := graph.lane_tangent(c_lane[ci], c_dist[ci])
+	# body forward is -Z; our yaw convention faces +Z — flip
+	var yaw := atan2(tan.x, tan.z) + PI
+	body.basis = Basis(Vector3.UP, yaw)
+	body.position = Vector3(pos.x, c_y[ci] + 0.4, pos.z)
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(1.8, 1.1, 4.3)
+	shape.shape = box
+	shape.position = Vector3(0, 0.7, 0)
+	body.add_child(shape)
+	var visual: Node3D = vdef.template.duplicate()
+	visual.rotation.y = PI     # model faces +Z, body forward is -Z
+	body.add_child(visual)
+	for wdef in vdef.wheels:
+		var w := VehicleWheel3D.new()
+		w.position = Vector3(-wdef.x, wdef.y + 0.15, -wdef.z)   # rotated frame
+		w.wheel_radius = vdef.wheel_r
+		w.wheel_rest_length = 0.15
+		w.suspension_stiffness = 45.0
+		w.use_as_traction = wdef.z < 0.0    # rear wheels in model frame
+		w.use_as_steering = wdef.z > 0.0
+		body.add_child(w)
+	body.linear_velocity = tan * c_speed[ci]
+	add_child(body)
+	c_promoted[ci] = body
+	promoted_count += 1
+
+
+func _sync_promoted(ci: int, _dt: float) -> void:
+	var body: TrafficMVehicle = c_promoted[ci]
+	body.target_speed = c_speed[ci]
+	var look := minf(c_dist[ci] + 6.0 + c_speed[ci] * 0.5, graph.lane_length[c_lane[ci]])
+	var tp := graph.lane_pos(c_lane[ci], look)
+	tp.y = body.global_position.y
+	body.target_point = tp
+	# pull the logical distance toward the body's real progress
+	var lp := graph.lane_pos(c_lane[ci], c_dist[ci])
+	var tan := graph.lane_tangent(c_lane[ci], c_dist[ci])
+	var err := Vector3(body.global_position.x - lp.x, 0.0, body.global_position.z - lp.z)
+	c_dist[ci] = clampf(c_dist[ci] + err.dot(tan) * 0.5, 0.0, graph.lane_length[c_lane[ci]])
+	c_y[ci] = body.global_position.y
+
+
+func _demote(ci: int, reproject: bool) -> void:
+	var body: TrafficMVehicle = c_promoted[ci]
+	if reproject:
+		c_speed[ci] = body.linear_velocity.length()
+	body.queue_free()
+	c_promoted[ci] = null
+	promoted_count -= 1
+
+
+# --------------------------------------------------------------------------
+# elevation + visuals
+# --------------------------------------------------------------------------
+func _update_elevation(_ppos: Vector3) -> void:
+	var space := get_world_3d().direct_space_state
+	var budget := 24
+	var scanned := 0
+	while budget > 0 and scanned < MAX_CARS:
+		var ci := _ray_cursor
+		_ray_cursor = (_ray_cursor + 1) % MAX_CARS
+		scanned += 1
+		if c_alive[ci] == 0 or c_promoted[ci] != null:
+			continue
+		budget -= 1
+		var p := graph.lane_pos(c_lane[ci], c_dist[ci])
+		var q := PhysicsRayQueryParameters3D.create(
+			Vector3(p.x, c_y[ci] + 2.5, p.z), Vector3(p.x, c_y[ci] - 9.0, p.z))
+		var hit := space.intersect_ray(q)
+		if not hit.is_empty() and hit.position.y < c_y[ci] + 1.2:
+			c_y[ci] = hit.position.y
+
+
+func _update_visuals(dt: float, ppos: Vector3) -> void:
+	var counts := PackedInt32Array()
+	counts.resize(_variants.size())
+	var light_count := 0
+	var mm_l: MultiMesh = _mm_lights.multimesh
+	var spot_candidates: Array = []
+	var blend := minf(dt / 0.15, 1.0)   # ~0.15 s basis smoothing
+
+	var frame_parity := int(Engine.get_process_frames()) & 1
+	for ci in MAX_CARS:
+		if c_alive[ci] == 0:
+			continue
+		if c_promoted[ci] != null:
+			var bp: Vector3 = (c_promoted[ci] as Node3D).global_position
+			c_px[ci] = bp.x
+			c_pz[ci] = bp.z
+			continue
+		var d := Vector2(c_px[ci] - ppos.x, c_pz[ci] - ppos.z).length()
+		var xf: Transform3D
+		if d >= mesh_distance and (ci & 1) == frame_parity:
+			# far imposter: reuse last frame's sampled transform
+			xf = _xf_cache[ci]
+		else:
+			var lane := c_lane[ci]
+			var p := graph.lane_pos(lane, c_dist[ci])
+			c_px[ci] = p.x
+			c_pz[ci] = p.z
+			var tan := graph.lane_tangent(lane, c_dist[ci])
+			var target_yaw := atan2(tan.x, tan.z)
+			c_yaw[ci] += wrapf(target_yaw - c_yaw[ci], -PI, PI) * blend
+			xf = Transform3D(Basis(Vector3.UP, c_yaw[ci]), Vector3(p.x, c_y[ci], p.z))
+			_xf_cache[ci] = xf
+			d = Vector2(p.x - ppos.x, p.z - ppos.z).length()
+		if d < mesh_distance:
+			var vi := c_variant[ci]
+			var mmi: MultiMeshInstance3D = _mm_cars[vi]
+			if counts[vi] < 64:
+				mmi.multimesh.set_instance_transform(counts[vi], xf)
+				counts[vi] += 1
+			spot_candidates.append([d, ci, xf])
+		elif light_count < 256:
+			mm_l.set_instance_transform(light_count, xf)
+			light_count += 1
+
+	for vi in _variants.size():
+		(_mm_cars[vi] as MultiMeshInstance3D).multimesh.visible_instance_count = counts[vi]
+	mm_l.visible_instance_count = light_count
+
+	# a handful of real headlight cones for the nearest cars
+	spot_candidates.sort_custom(func(a, b): return a[0] < b[0])
+	for i in _spots.size():
+		var s := _spots[i]
+		if i < spot_candidates.size():
+			var xf: Transform3D = spot_candidates[i][2]
+			s.global_transform = xf * Transform3D(Basis(Vector3.UP, PI), Vector3(0, 0.7, 2.0))
+			s.visible = true
+		else:
+			s.visible = false
+
+
+func _build_visual_pools() -> void:
+	_variants = TrafficFleet.build_variants()
+	for vdef in _variants:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = vdef.mesh
+		mm.instance_count = 64
+		mm.visible_instance_count = 0
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mmi)
+		_mm_cars.append(mmi)
+	var lm := MultiMesh.new()
+	lm.transform_format = MultiMesh.TRANSFORM_3D
+	lm.mesh = TrafficFleet.build_light_quads()
+	lm.instance_count = 256
+	lm.visible_instance_count = 0
+	_mm_lights = MultiMeshInstance3D.new()
+	_mm_lights.multimesh = lm
+	_mm_lights.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_mm_lights)
+	for i in headlight_pool:
+		var s := SpotLight3D.new()
+		s.spot_range = 30.0
+		s.spot_angle = 28.0
+		s.light_energy = 3.0
+		s.light_color = Color(1.0, 0.93, 0.8)
+		s.light_specular = 0.05
+		s.shadow_enabled = false
+		s.visible = false
+		add_child(s)
+		_spots.append(s)
+	_debug_mesh = MeshInstance3D.new()
+	_debug_mesh.mesh = ImmediateMesh.new()
+	var dm := StandardMaterial3D.new()
+	dm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	dm.vertex_color_use_as_albedo = true
+	_debug_mesh.material_override = dm
+	add_child(_debug_mesh)
+
+
+func _build_overlay() -> void:
+	var canvas := CanvasLayer.new()
+	add_child(canvas)
+	overlay = Label.new()
+	overlay.position = Vector2(14, 120)
+	overlay.add_theme_font_size_override("font_size", 13)
+	overlay.add_theme_color_override("font_color", Color(0.6, 0.9, 0.7, 0.9))
+	canvas.add_child(overlay)
+
+
+func _log_stuck(ci: int, lane: int, why: String) -> void:
+	var msg := "stuck car %d on %s: %s" % [ci, graph.lane_id(lane), why]
+	stuck_log.append(msg)
+	if stuck_log.size() > 64:
+		stuck_log.pop_front()
+	push_warning("[traffic] " + msg)
+
+
+## Debug draw: nearby lanes as coloured lines with direction arrows (key T).
+func _draw_debug_lanes(ppos: Vector3) -> void:
+	var im: ImmediateMesh = _debug_mesh.mesh
+	im.clear_surfaces()
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	var drawn := 0
+	for lane in graph.lane_count:
+		if drawn > 500:
+			break
+		var p0 := graph.lane_pos(lane, 0.0)
+		if Vector2(p0.x - ppos.x, p0.z - ppos.z).length() > 220.0:
+			continue
+		drawn += 1
+		var internal := graph.lane_flags[lane] & 1 != 0
+		var col := Color(1.0, 0.6, 0.15) if internal else Color(0.3, 0.75, 1.0)
+		var s0 := graph.lane_point_start[lane]
+		var s1 := graph.lane_point_start[lane + 1]
+		for i in range(s0, s1 - 1):
+			var a := Vector3(graph.points[i * 4], ppos.y + 0.4, graph.points[i * 4 + 2])
+			var b := Vector3(graph.points[(i + 1) * 4], ppos.y + 0.4, graph.points[(i + 1) * 4 + 2])
+			im.surface_set_color(col)
+			im.surface_add_vertex(a)
+			im.surface_set_color(col)
+			im.surface_add_vertex(b)
+		# direction arrow at the midpoint
+		var mid := graph.lane_length[lane] * 0.5
+		var mp := graph.lane_pos(lane, mid)
+		mp.y = ppos.y + 0.4
+		var tn := graph.lane_tangent(lane, mid)
+		var side := Vector3(-tn.z, 0.0, tn.x)
+		for sgn in [-1.0, 1.0]:
+			im.surface_set_color(Color.WHITE)
+			im.surface_add_vertex(mp + tn * 1.2)
+			im.surface_set_color(Color.WHITE)
+			im.surface_add_vertex(mp - tn * 0.4 + side * sgn * 0.7)
+	im.surface_end()

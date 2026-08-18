@@ -1,3 +1,6 @@
 .godot/
 *.tmp
 dist/
+work/
+out/lane_graph_debug.geojson
+out/lane_graph_preview.png

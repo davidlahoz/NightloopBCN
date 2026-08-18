@@ -40,7 +40,6 @@ var hud: Label
 var speedo: Speedo
 var street_names: StreetNames
 var street_plaque: StreetPlaque
-var traffic: TrafficSystem
 var bcn_lights: BarcelonaStreetlights
 var _street_accum := 0.0
 var _trip_m := 0.0
@@ -154,10 +153,9 @@ func _ready() -> void:
 		street_names = StreetNames.new()
 		street_plaque = StreetPlaque.new()
 		canvas.add_child(street_plaque)
-		traffic = TrafficSystem.new(street_names)
-		add_child(traffic)
 		bcn_lights = BarcelonaStreetlights.new(street_names)
 		add_child(bcn_lights)
+		TrafficManager.setup(car)
 
 	# ---- prewarm the streamers around the spawn ----
 	if barcelona != null:
@@ -241,8 +239,6 @@ func _process(raw_dt: float) -> void:
 
 	if barcelona != null:
 		barcelona.update(dt, car.pos.x, car.pos.z)
-		if traffic != null:
-			traffic.update(dt, car.pos)
 		if bcn_lights != null:
 			bcn_lights.update(dt, car.pos.x, car.pos.z)
 	else:
@@ -259,13 +255,10 @@ func _process(raw_dt: float) -> void:
 			street_plaque.set_street(street_names.query(car.pos.x, car.pos.z))
 		street_plaque.update_plaque(dt)
 	if OS.get_cmdline_user_args().has("--probe") and _frame % 120 == 0:
-		print("PROBE f=%d speed=%.1f poles=%d heads=%d li=%.2f lamp_e=%.1f head_local=%v" % [
-			_frame, car.speed,
-			bcn_lights._mm.instance_count if bcn_lights != null else -1,
-			bcn_lights._heads.size() if bcn_lights != null else -1,
-			bcn_lights.intensity if bcn_lights != null else -1.0,
-			bcn_lights._lamp_mat.emission_energy_multiplier if bcn_lights != null else -1.0,
-			bcn_lights._head_local if bcn_lights != null else Vector3.ZERO])
+		print("PROBE f=%d speed=%.1f cars=%d promoted=%d tick=%.2fms max=%.2fms graph=%s stuck=%d" % [
+			_frame, car.speed, TrafficManager.alive_count, TrafficManager.promoted_count,
+			TrafficManager.tick_ms, TrafficManager.tick_ms_max,
+			TrafficManager.graph.ready, TrafficManager.stuck_log.size()])
 	_update_hud(raw_dt)
 	_frame += 1
 	if not _screenshot_path.is_empty() and _frame == _shot_frame:
