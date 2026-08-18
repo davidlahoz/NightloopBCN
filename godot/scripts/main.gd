@@ -160,10 +160,11 @@ func _ready() -> void:
 	# captures it, Esc or losing focus releases it
 	if not _screenshot_path.is_empty():
 		input.mouse_enabled = false
-		# capture runs: vsync off + always-on-top, else macOS App Naps the
-		# occluded window and scripted frames crawl at a few fps
+		# capture runs: vsync off; in movie-maker mode frames render at full
+		# speed even occluded, so keep the window out of the user's way there
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true)
+		if not OS.has_feature("movie"):
+			DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true)
 
 
 func _input(event: InputEvent) -> void:
@@ -220,6 +221,8 @@ func _process(raw_dt: float) -> void:
 	# per-frame physical surface + headlights
 	ground_mat.set_shader_parameter("wetness", env_ctrl.road_wetness)
 	ground_mat.set_shader_parameter("puddle_level", env_ctrl.road_puddles)
+	if barcelona != null:
+		barcelona.set_wetness(env_ctrl.road_wetness, env_ctrl.road_puddles)
 	car.set_headlights(0.0 if _no_beams else env_ctrl.headlights)
 	if _hide_car:
 		car.visible = false
@@ -319,6 +322,8 @@ func _on_env_push(params: Dictionary, _headlights: float) -> void:
 	facade_mat.set_shader_parameter("window_glow", 0.7 + params.neon_intensity * 1.2)
 	if street_lights != null:
 		street_lights.set_intensity(params.streetlight_intensity)
+	if barcelona != null:
+		barcelona.apply_environment(params)
 
 
 ## Point the spawned car down the street: probe 16 headings and pick the one

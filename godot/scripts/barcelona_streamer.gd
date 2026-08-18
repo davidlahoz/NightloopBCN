@@ -36,12 +36,23 @@ var _loading: Dictionary = {}   # path -> Vector2i
 var _pending: Array = []        # [Vector2i, path], nearest-first
 var _cur_tile := Vector2i(1 << 20, 1 << 20)
 
+# night street lighting: warm omnis snapped onto road surfaces around the
+# car on a stable 34 m world grid (no pole data in the tiles — the lights
+# read as Barcelona's catenary lamps; invisible by day)
+const LIGHT_GRID := 34.0
+const LIGHT_POOL := 24
+const LIGHT_REFRESH := 0.4
+var _lights: Array[OmniLight3D] = []
+var _light_intensity := 0.35
+var _light_accum := 0.0
+
 
 static func available() -> bool:
 	return FileAccess.file_exists(MANIFEST_PATH)
 
 
 func _init() -> void:
+	_build_materials()
 	var f := FileAccess.open(MANIFEST_PATH, FileAccess.READ)
 	if f == null:
 		push_error("[NIGHTLOOP] barcelona manifest missing")
@@ -59,13 +70,58 @@ func _init() -> void:
 	print("[NIGHTLOOP] barcelona manifest: %d tiles (%s)" % [_tiles.size(), attribution])
 
 
-func update(_dt: float, car_x: float, car_z: float) -> void:
+func update(dt: float, car_x: float, car_z: float) -> void:
 	var ct := Vector2i(floori(car_x / TILE), floori(car_z / TILE))
 	if ct != _cur_tile:
 		_cur_tile = ct
 		_rescan()
 	_poll_loads()
 	_start_loads()
+	_light_accum += dt
+	if _light_accum >= LIGHT_REFRESH:
+		_light_accum = 0.0
+		_place_lights(car_x, car_z)
+
+
+## Assign the omni pool to the nearest road-surface points on the light grid.
+func _place_lights(car_x: float, car_z: float) -> void:
+	if _lights.is_empty():
+		for i in LIGHT_POOL:
+			var l := OmniLight3D.new()
+			l.light_color = Color(1.0, 0.83, 0.6)
+			l.omni_range = 26.0
+			l.omni_attenuation = 1.4
+			l.light_energy = 0.0
+			l.shadow_enabled = false
+			add_child(l)
+			_lights.append(l)
+	if _light_intensity < 0.01 or not is_inside_tree():
+		for l in _lights:
+			l.light_energy = 0.0
+		return
+	var space := get_world_3d().direct_space_state
+	var gi := roundi(car_x / LIGHT_GRID)
+	var gj := roundi(car_z / LIGHT_GRID)
+	var placed := 0
+	# rings outward so the nearest grid points win the pool
+	for r in 4:
+		for di in range(-r, r + 1):
+			for dj in range(-r, r + 1):
+				if maxi(absi(di), absi(dj)) != r or placed >= LIGHT_POOL:
+					continue
+				var x := (gi + di) * LIGHT_GRID
+				var z := (gj + dj) * LIGHT_GRID
+				var q := PhysicsRayQueryParameters3D.create(
+					Vector3(x, 20.0, z), Vector3(x, -8.0, z))
+				var hit := space.intersect_ray(q)
+				if hit.is_empty() or hit.normal.y < 0.9 or hit.position.y > 7.5:
+					continue   # not open road (wall, or a building roof)
+				var l := _lights[placed]
+				l.position = hit.position + Vector3(0, 5.5, 0)
+				l.light_energy = _light_intensity * 5.5
+				placed += 1
+	for i in range(placed, LIGHT_POOL):
+		_lights[i].light_energy = 0.0
 
 
 ## Blocking load of the immediate ring (boot): the car needs ground under it
@@ -102,24 +158,50 @@ func _add_scene(holder: Node3D, scene: PackedScene) -> void:
 
 ## HOOK — the glbs ship placeholder-colored materials named mat_road,
 ## mat_roof, mat_wall_residential, mat_wall_commercial, mat_wall_industrial.
-## For now they're swapped for simple neutral PBR flats so the city reads;
-## replace the entries in _material_set() with real textured materials later.
-static var _mat_overrides: Dictionary = _material_set()
+## They're swapped for NightLoop shaders: procedural windows on the walls
+## (world-space — the meshes have no UVs) and the wetness-aware asphalt.
+## Replace entries in _build_materials() to change the look further.
+var _mat_overrides: Dictionary = {}
+var _wall_mats: Array[ShaderMaterial] = []
+var _road_mat: ShaderMaterial
 
 
-static func _material_set() -> Dictionary:
-	var mk := func(albedo: Color, rough: float) -> StandardMaterial3D:
-		var m := StandardMaterial3D.new()
-		m.albedo_color = albedo
-		m.roughness = rough
+func _build_materials() -> void:
+	var facade_shader: Shader = load("res://shaders/barcelona_facade.gdshader")
+	var road_shader: Shader = load("res://shaders/barcelona_road.gdshader")
+	_road_mat = ShaderMaterial.new()
+	_road_mat.shader = road_shader
+	var wall := func(tint: Color) -> ShaderMaterial:
+		var m := ShaderMaterial.new()
+		m.shader = facade_shader
+		m.set_shader_parameter("wall_tint", Vector3(tint.r, tint.g, tint.b))
+		_wall_mats.append(m)
 		return m
-	return {
-		"mat_road": mk.call(Color(0.052, 0.053, 0.058), 0.82),
-		"mat_roof": mk.call(Color(0.28, 0.22, 0.18), 0.92),
-		"mat_wall_residential": mk.call(Color(0.52, 0.42, 0.33), 0.85),
-		"mat_wall_commercial": mk.call(Color(0.45, 0.44, 0.42), 0.7),
-		"mat_wall_industrial": mk.call(Color(0.38, 0.38, 0.37), 0.85),
+	var roof := StandardMaterial3D.new()
+	roof.albedo_color = Color(0.17, 0.14, 0.12)
+	roof.roughness = 0.95
+	_mat_overrides = {
+		"mat_road": _road_mat,
+		"mat_roof": roof,
+		"mat_wall_residential": wall.call(Color(0.55, 0.42, 0.31)),
+		"mat_wall_commercial": wall.call(Color(0.47, 0.45, 0.42)),
+		"mat_wall_industrial": wall.call(Color(0.38, 0.38, 0.37)),
 	}
+
+
+## Time-of-day push (window lighting + street lamps), from main's env hook.
+func apply_environment(params: Dictionary) -> void:
+	for m in _wall_mats:
+		m.set_shader_parameter("window_lit_fraction", params.window_lit_fraction)
+		m.set_shader_parameter("window_glow", 0.7 + params.neon_intensity * 1.2)
+	_light_intensity = params.streetlight_intensity
+	_light_accum = LIGHT_REFRESH   # re-place on next update
+
+
+## Per-frame physical surface state.
+func set_wetness(wet: float, pud: float) -> void:
+	_road_mat.set_shader_parameter("wetness", wet)
+	_road_mat.set_shader_parameter("puddle_level", pud)
 
 
 func _apply_material_overrides(inst: Node) -> void:
