@@ -1,4 +1,4 @@
-<p style="text-align: center"><img src="logo.png"></p>
+<p align="center"><img src="logo.png" alt="NightloopBCN" width="360"></p>
 
 A night driving game built in Godot 4, set in real Barcelona. You load in,
 roll out onto Carrer de l'Hort de la Vila, and drive — real streets from
@@ -15,7 +15,7 @@ godot          # or open the folder in the Godot editor and press Play
 First run after cloning: let the editor import the ~2,270 city tiles once.
 
 ## Controls
-<p style="text-align: center"><img src="controls.png"></p>
+<p align="center"><img src="controls.png" alt="Controls: WASD drive · Shift/RMB glide · Space handbrake · mouse orbit/zoom · C camera · M city map (zoom for street names, click to teleport) · T traffic debug · P mute · Esc free mouse · 1-3 time of day" width="560"></p>
 
 ## What's inside
 
