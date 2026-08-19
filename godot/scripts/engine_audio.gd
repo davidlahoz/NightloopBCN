@@ -12,14 +12,9 @@ var _pitch := 0.7
 
 func _init() -> void:
 	_player = AudioStreamPlayer.new()
-	var stream: AudioStream = load("res://assets/audio/engine-loop.wav")
-	if stream is AudioStreamWAV:
-		stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
-		stream.loop_begin = 0
-		var bytes_per_frame := 2 if stream.format == AudioStreamWAV.FORMAT_16_BITS else 1
-		if stream.stereo:
-			bytes_per_frame *= 2
-		stream.loop_end = stream.data.size() / bytes_per_frame
+	var stream: AudioStream = load("res://assets/audio/car-engine.mp3")
+	if stream is AudioStreamMP3:
+		stream.loop = true
 	_player.stream = stream
 	_player.volume_db = -60.0
 	add_child(_player)

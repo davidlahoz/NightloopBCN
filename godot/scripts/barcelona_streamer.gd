@@ -65,6 +65,7 @@ func update(_dt: float, car_x: float, car_z: float) -> void:
 	if ct != _cur_tile:
 		_cur_tile = ct
 		_rescan()
+		_update_mask_grid()
 	_poll_loads()
 	_start_loads()
 
@@ -84,6 +85,7 @@ func prewarm(car_x: float, car_z: float) -> void:
 				if scene != null:
 					_add_scene(holder, scene, key)
 	_rescan()
+	_update_mask_grid()
 
 
 func _make_holder(key: Vector2i) -> Node3D:
@@ -91,7 +93,34 @@ func _make_holder(key: Vector2i) -> Node3D:
 	holder.name = "tile_%d_%d" % [key.x, key.y]
 	add_child(holder)
 	_live[key] = holder
+	_add_ground_plane(holder, key)
 	return holder
+
+
+## The tile drop ships sidewalk ribbons and buildings but NO carriageway or
+## plaza polygons — the streets were literally holes (sky showed through,
+## physics rays missed, promoted traffic fell). Each tile gets a generated
+## ground plane at kerb depth (sidewalk ribbons sit 12 cm above it) running
+## the classifying ground shader, plus collision.
+const GROUND_Y := -0.12
+
+func _add_ground_plane(holder: Node3D, key: Vector2i) -> void:
+	var ground := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(TILE, TILE)
+	ground.mesh = pm
+	ground.material_override = _road_mat
+	ground.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ground.position = Vector3((key.x + 0.5) * TILE, GROUND_Y, (key.y + 0.5) * TILE)
+	holder.add_child(ground)
+	var sb := StaticBody3D.new()
+	var cs := CollisionShape3D.new()
+	var bx := BoxShape3D.new()
+	bx.size = Vector3(TILE, 0.3, TILE)
+	cs.shape = bx
+	cs.position = Vector3(0, -0.15, 0)   # box top flush with the plane
+	sb.add_child(cs)
+	ground.add_child(sb)
 
 
 func _add_scene(holder: Node3D, scene: PackedScene, key: Vector2i) -> void:
@@ -126,9 +155,6 @@ func _build_materials() -> void:
 			load("res://assets/textures/ground/%s_normal.jpg" % pair[1]))
 		_road_mat.set_shader_parameter(pair[0] + "_rgh",
 			load("res://assets/textures/ground/%s_rough.jpg" % pair[1]))
-	var blank := Image.create(1, 1, false, Image.FORMAT_RGB8)
-	blank.fill(Color(0, 0, 0))
-	_road_mat.set_shader_parameter("class_mask", ImageTexture.create_from_image(blank))
 	var wall := func(tint: Color) -> ShaderMaterial:
 		var m := ShaderMaterial.new()
 		m.shader = facade_shader
@@ -157,40 +183,68 @@ func apply_environment(params: Dictionary) -> void:
 
 ## Per-frame physical surface state.
 func set_wetness(wet: float, pud: float) -> void:
-	_wet = wet
-	_pud = pud
 	_road_mat.set_shader_parameter("wetness", wet)
 	_road_mat.set_shader_parameter("puddle_level", pud)
-	for key in _ground_mats:
-		_ground_mats[key].set_shader_parameter("wetness", wet)
-		_ground_mats[key].set_shader_parameter("puddle_level", pud)
+	_road_mat.set_shader_parameter("debug_classes",
+		OS.get_cmdline_user_args().has("--ground-debug"))
 
 
-var _ground_mats: Dictionary = {}   # tile key -> per-tile ground material
-var _wet := 0.15
-var _pud := 0.22
+## Class-mask grid: tile meshes overhang their nominal bounds by up to a
+## full tile, so ONE global material samples a Texture2DArray of the masks
+## for the grid_n x grid_n tiles around the player, picked per fragment by
+## world position. Rebuilt when the player crosses a tile border.
+const MASK_GRID := 9
+var _mask_cache: Dictionary = {}    # tile key -> Image (black when missing)
+var _mask_blank: Image
+var _mask_center := Vector2i(0x7FFFFFFF, 0x7FFFFFFF)
 
 
-## The ground material for one tile: the base with that tile's baked
-## classification mask (barcelona/masks/, .gdignore'd — loaded raw).
-func _ground_mat_for(key: Vector2i) -> ShaderMaterial:
-	if _ground_mats.has(key):
-		return _ground_mats[key]
-	var m: ShaderMaterial = _road_mat.duplicate()
-	m.set_shader_parameter("tile_origin", Vector2(key.x * TILE, key.y * TILE))
-	var mp := ProjectSettings.globalize_path(
-		"res://barcelona/masks/tile_%d_%d.png" % [key.x, key.y])
+func _mask_image(key: Vector2i) -> Image:
+	if _mask_cache.has(key):
+		return _mask_cache[key]
+	var img: Image = null
+	# read through FileAccess so it also works from inside an exported pck
+	var mp := "res://barcelona/masks/tile_%d_%d.png" % [key.x, key.y]
 	if FileAccess.file_exists(mp):
-		var img := Image.load_from_file(mp)
-		if img != null:
-			m.set_shader_parameter("class_mask", ImageTexture.create_from_image(img))
-	m.set_shader_parameter("wetness", _wet)
-	m.set_shader_parameter("puddle_level", _pud)
-	_ground_mats[key] = m
-	return m
+		var buf := FileAccess.get_file_as_bytes(mp)
+		if not buf.is_empty():
+			img = Image.new()
+			if img.load_png_from_buffer(buf) != OK:
+				img = null
+			elif img.get_format() != Image.FORMAT_RGB8:
+				img.convert(Image.FORMAT_RGB8)
+	if img == null:
+		if _mask_blank == null:
+			_mask_blank = Image.create(512, 512, false, Image.FORMAT_RGB8)
+			_mask_blank.fill(Color(0, 0, 0))
+		img = _mask_blank
+	_mask_cache[key] = img
+	return img
 
 
-func _apply_material_overrides(inst: Node, key: Vector2i) -> void:
+func _update_mask_grid() -> void:
+	if _cur_tile == _mask_center:
+		return
+	_mask_center = _cur_tile
+	var half := MASK_GRID / 2
+	var corner := _cur_tile - Vector2i(half, half)
+	var images: Array[Image] = []
+	for dz in MASK_GRID:
+		for dx in MASK_GRID:
+			images.append(_mask_image(corner + Vector2i(dx, dz)))
+	var ta := Texture2DArray.new()
+	ta.create_from_images(images)
+	_road_mat.set_shader_parameter("class_masks", ta)
+	_road_mat.set_shader_parameter("grid_origin",
+		Vector2(corner.x * TILE, corner.y * TILE))
+	_road_mat.set_shader_parameter("grid_n", MASK_GRID)
+	# drop far cache entries so the Image cache doesn't grow unbounded
+	for key in _mask_cache.keys():
+		if maxi(absi(key.x - _cur_tile.x), absi(key.y - _cur_tile.y)) > half + 2:
+			_mask_cache.erase(key)
+
+
+func _apply_material_overrides(inst: Node, _key: Vector2i) -> void:
 	var stack: Array[Node] = [inst]
 	while not stack.is_empty():
 		var n: Node = stack.pop_back()
@@ -199,11 +253,7 @@ func _apply_material_overrides(inst: Node, key: Vector2i) -> void:
 		if n is MeshInstance3D and n.mesh != null:
 			for si in n.mesh.get_surface_count():
 				var mat: Material = n.mesh.surface_get_material(si)
-				if mat == null:
-					continue
-				if mat.resource_name == "mat_road":
-					n.set_surface_override_material(si, _ground_mat_for(key))
-				elif _mat_overrides.has(mat.resource_name):
+				if mat != null and _mat_overrides.has(mat.resource_name):
 					n.set_surface_override_material(si, _mat_overrides[mat.resource_name])
 
 
@@ -233,7 +283,6 @@ func _rescan() -> void:
 		if _grid_dist(key) > DROP:
 			_live[key].queue_free()
 			_live.erase(key)
-			_ground_mats.erase(key)
 	_pending = _pending.filter(func(e): return _grid_dist(e[0]) <= RADIUS)
 
 

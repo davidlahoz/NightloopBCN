@@ -40,6 +40,8 @@ var _spawn_yaw := NAN
 var _crash_sfx: AudioStreamPlayer
 var _crash_cool := 0.0
 var _open_map_at := 0
+var _splash: CanvasLayer
+var _splash_t := 0.0
 
 var _frame := 0
 var _screenshot_path := ""
@@ -150,6 +152,20 @@ func _ready() -> void:
 		city_map.teleport_cb = _teleport_to
 		canvas.add_child(city_map)
 
+	# ---- splash: the logo holds over boot, then fades out in 2 s ----
+	_splash = CanvasLayer.new()
+	_splash.layer = 100
+	var sbg := ColorRect.new()
+	sbg.color = Color(0.02, 0.025, 0.045)
+	sbg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_splash.add_child(sbg)
+	var slogo := TextureRect.new()
+	slogo.texture = load("res://assets/textures/logo.png")
+	slogo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	slogo.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_splash.add_child(slogo)
+	add_child(_splash)
+
 	# ---- prewarm the streamer around the spawn ----
 	barcelona.prewarm(car.pos.x, car.pos.z)
 	env_ctrl.jump_to(boot_state)
@@ -184,6 +200,14 @@ func _notification(what: int) -> void:
 
 func _process(raw_dt: float) -> void:
 	var dt := minf(raw_dt, MAX_STEP)
+	if _splash != null:
+		_splash_t += raw_dt
+		var fade := clampf((_splash_t - 0.4) / 2.0, 0.0, 1.0)   # brief hold, 2 s fade
+		for c in _splash.get_children():
+			(c as CanvasItem).modulate.a = 1.0 - fade
+		if fade >= 1.0:
+			_splash.queue_free()
+			_splash = null
 	_space = get_world_3d().direct_space_state
 	car.space = _space
 	if _spawn_heading_pending:
@@ -198,6 +222,19 @@ func _process(raw_dt: float) -> void:
 	input.begin_frame()
 	if input.toggle_mute:
 		audio.muted = not audio.muted
+	if _frame == 120 and OS.get_cmdline_user_args().has("--ground-debug"):
+		for off in [Vector2(0, 0), Vector2(6, 6), Vector2(-8, 0)]:
+			var gq := PhysicsRayQueryParameters3D.create(
+				Vector3(car.pos.x + off.x, car.pos.y + 4.0, car.pos.z + off.y),
+				Vector3(car.pos.x + off.x, car.pos.y - 20.0, car.pos.z + off.y))
+			var gh := _space.intersect_ray(gq)
+			if gh.is_empty():
+				print("[dbg] off=%s NO HIT (car y=%.2f)" % [off, car.pos.y])
+			else:
+				var col: Node = gh.collider
+				print("[dbg] off=%s hit y=%.2f collider=%s parent=%s gp=%s" % [
+					off, gh.position.y, col.name, col.get_parent().name,
+					col.get_parent().get_parent().name])
 	if _open_map_at > 0 and _frame == _open_map_at:
 		input.toggle_map = true   # capture tooling: pop the map overlay
 	if input.toggle_map and city_map != null:
@@ -370,6 +407,13 @@ func _try_spawn_heading() -> void:
 		var dirv := Vector3(sin(yaw), 0.0, cos(yaw))
 		var score := 0.0
 		for s: float in [6.0, 12.0, 18.0, 24.0, 30.0]:
+			# the generated ground planes run UNDER the buildings, so flat
+			# ground alone is not proof of road — the path must also be
+			# clear of walls at bumper height
+			var wq := PhysicsRayQueryParameters3D.create(
+				car.pos + Vector3(0, 1.2, 0), car.pos + dirv * s + Vector3(0, 1.2, 0))
+			if not _space.intersect_ray(wq).is_empty():
+				break
 			var p := car.pos + dirv * s + Vector3(0, 3, 0)
 			var q := PhysicsRayQueryParameters3D.create(p, p + Vector3(0, -6, 0))
 			var hit := _space.intersect_ray(q)

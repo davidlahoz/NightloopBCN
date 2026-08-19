@@ -5,8 +5,7 @@ extends SceneTree
 
 func _init() -> void:
 	var totals: Dictionary = {}
-	for t in ["tile_0_0_roads.glb", "tile_3_2_roads.glb", "tile_-2_1_roads.glb",
-			"tile_0_0_buildings.glb"]:
+	for t in ["tile_7_1_buildings.glb", "tile_7_0_buildings.glb", "tile_8_1_buildings.glb"]:
 		var path: String = "res://barcelona/tiles/" + t
 		if not ResourceLoader.exists(path):
 			continue

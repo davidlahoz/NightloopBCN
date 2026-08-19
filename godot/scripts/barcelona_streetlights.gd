@@ -86,6 +86,11 @@ func _rescan(cx: float, cz: float) -> void:
 	var transforms: Array[Transform3D] = []
 	_heads = PackedVector3Array()
 	var done_ways: Dictionary = {}
+	# the previous poles' own colliders must not catch the placement rays
+	# (that planted poles on top of their predecessors, floating mid-air)
+	var excludes: Array[RID] = []
+	for b in _pole_bodies:
+		excludes.append(b.get_rid())
 	for si in _sn.segments_near(cx, cz, RADIUS):
 		var wi := _sn.seg_way(si)
 		if done_ways.has(wi):
@@ -124,8 +129,11 @@ func _rescan(cx: float, cz: float) -> void:
 					pp = p + right * offset
 					var q := PhysicsRayQueryParameters3D.create(
 						Vector3(pp.x, 20.0, pp.y), Vector3(pp.x, -8.0, pp.y))
+					q.exclude = excludes
 					hit = space.intersect_ray(q)
-					if not hit.is_empty() and hit.normal.y > 0.9 and hit.position.y < 7.5:
+					# flat city: real ground sits near 0 — anything higher is
+					# a roof, a car top or another pole
+					if not hit.is_empty() and hit.normal.y > 0.9 and hit.position.y < 1.0:
 						break
 					hit = {}
 				if hit.is_empty():

@@ -19,10 +19,9 @@ Every third-party asset vendored into this repository, with source and licence.
   [skfb.ly/oC6ON](https://skfb.ly/oC6ON) by
   [Streetlights & ETC](https://sketchfab.com/streetlights), CC Attribution 4.0.
   Merged and normalised at runtime for the streetlight field.
-- **Car Engine Loop 96kHz 4s** (`godot/assets/audio/engine-loop.wav`) —
-  [OpenGameArt](https://opengameart.org/content/car-engine-loop-96khz-4s) by
-  **qubodup (Iwan Gabovitch)**, CC-BY 3.0. Revved in real time via playback
-  rate.
+- **car-engine.mp3** (`godot/assets/audio/car-engine.mp3`) — provided by the
+  project owner; source/licence unknown. The engine loop, revved in real
+  time via playback rate.
 - **Marble007** (`godot/assets/textures/marble007.jpg`) —
   [ambientCG](https://ambientcg.com/view?id=Marble007), CC0. The street-name
   plaque HUD.
