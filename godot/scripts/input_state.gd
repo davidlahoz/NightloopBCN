@@ -13,6 +13,7 @@ var mood_key := 0        # 1..3, one-shot
 var jump_key := 0        # 6..9, one-shot
 var toggle_camera := false
 var toggle_mute := false
+var toggle_map := false
 
 ## Capture tooling can turn the mouse off entirely.
 var mouse_enabled := true
@@ -49,6 +50,8 @@ func handle_event(event: InputEvent) -> void:
 		toggle_camera = true
 	elif event.is_action_pressed("mute"):
 		toggle_mute = true
+	elif event.is_action_pressed("map"):
+		toggle_map = true
 	elif event.is_action_pressed("time_day"):
 		mood_key = 1
 	elif event.is_action_pressed("time_afternoon"):
@@ -81,6 +84,7 @@ func end_frame() -> void:
 	jump_key = 0
 	toggle_camera = false
 	toggle_mute = false
+	toggle_map = false
 
 
 var throttle: float:

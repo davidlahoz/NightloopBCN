@@ -32,22 +32,30 @@ from lxml import etree
 # touching code. Values of None mean "flag without value".
 # --------------------------------------------------------------------------
 CONFIG = {
+    # Flags per spec. --xml-type-files (base osmNetconvert.typ.xml ONLY — no
+    # German urban typemap) supplies OSM's implied speed/lane/priority
+    # defaults; --keep-edges.by-vclass passenger is a WHITELIST (not a
+    # blacklist); --keep-edges.components deliberately absent. The typemap
+    # path is resolved from $SUMO_HOME at runtime ("{SUMO_HOME}" placeholder).
     "netconvert_flags": {
+        "--xml-type-files": "{SUMO_HOME}/data/typemap/osmNetconvert.typ.xml",
         "--geometry.remove": None,
+        "--roundabouts.guess": None,
         "--ramps.guess": None,
         "--junctions.join": None,
-        "--roundabouts.guess": None,
-        "--osm.turn-lanes": None,
         "--tls.guess-signals": None,
         "--tls.discard-simple": None,
         "--tls.join": None,
-        "--tls.default-type": "actuated",
-        "--remove-edges.by-vclass": "rail_slow,rail_fast,bicycle,pedestrian",
+        "--osm.turn-lanes": None,
         "--no-turnarounds": None,
+        "--keep-edges.by-vclass": "passenger",
+        "--output.street-names": None,   # names for stuck-car logs/debug
+        "--verbose": None,
     },
+    # default slice: central Eixample (Passeig de Gracia / Arago / Gran Via)
+    "default_bbox": (2.145, 41.380, 2.195, 41.410),
     "resample_spacing_m": 2.0,
     "geojson_point_stride": 2,      # thin the debug geojson a little
-    "min_lane_length_m": 1.0,
 }
 
 MANIFEST_DEFAULT = "barcelona/manifest.json"
@@ -116,6 +124,23 @@ def find_netconvert():
 # --------------------------------------------------------------------------
 # A1 — convert
 # --------------------------------------------------------------------------
+def resolve_sumo_home():
+    home = os.environ.get("SUMO_HOME", "")
+    if not home:
+        try:
+            import sumo
+            home = os.path.dirname(sumo.__file__)
+            os.environ["SUMO_HOME"] = home
+            print(f"[A1] $SUMO_HOME unset — using the eclipse-sumo package: {home}")
+        except ImportError:
+            die("$SUMO_HOME is not set and eclipse-sumo is not installed.\n"
+                "  python3 -m pip install -r tools/requirements.txt")
+    typemap = os.path.join(home, "data", "typemap", "osmNetconvert.typ.xml")
+    if not os.path.exists(typemap):
+        die(f"typemap missing at {typemap} — is $SUMO_HOME correct?")
+    return home
+
+
 def stage_convert(args):
     from shutil import which
     if which("osmium") is None:
@@ -123,34 +148,48 @@ def stage_convert(args):
     nc = find_netconvert()
     ver = subprocess.run([nc, "--version"], capture_output=True, text=True).stdout.splitlines()[0]
     print(f"[A1] {ver}")
+    sumo_home = resolve_sumo_home()
 
-    osm_xml = os.path.join(args.work, "barcelona.osm")
-    if args.force or not os.path.exists(osm_xml) or \
-            os.path.getmtime(osm_xml) < os.path.getmtime(args.pbf):
-        print(f"[A1] osmium cat {args.pbf} -> {osm_xml}")
-        subprocess.run(["osmium", "cat", args.pbf, "-o", osm_xml, "--overwrite"], check=True)
+    # --bbox slice (default: the Eixample; "full" processes the whole extract)
+    if args.bbox == "full":
+        src_osm = os.path.join(args.work, "barcelona.osm")
+        if args.force or not os.path.exists(src_osm) or \
+                os.path.getmtime(src_osm) < os.path.getmtime(args.pbf):
+            print(f"[A1] osmium cat {args.pbf} -> {src_osm}")
+            subprocess.run(["osmium", "cat", args.pbf, "-o", src_osm, "--overwrite"], check=True)
+        net_xml = os.path.join(args.work, "barcelona.net.xml")
     else:
-        print(f"[A1] reuse {osm_xml}")
+        bb = tuple(float(v) for v in args.bbox.split(",")) if args.bbox \
+            else CONFIG["default_bbox"]
+        src_osm = os.path.join(args.work, "slice.osm")
+        print(f"[A1] osmium extract bbox {bb} -> {src_osm}")
+        subprocess.run(["osmium", "extract",
+                        "-b", ",".join(str(v) for v in bb),
+                        args.pbf, "-o", src_osm, "--overwrite"], check=True)
+        net_xml = os.path.join(args.work, "barcelona.net.xml")
 
-    net_xml = os.path.join(args.work, "barcelona.net.xml")
-    if not args.force and os.path.exists(net_xml) and \
-            os.path.getmtime(net_xml) >= os.path.getmtime(osm_xml):
-        print(f"[A1] reuse {net_xml}")
-        return net_xml
-    cmd = [nc, "--osm-files", osm_xml, "--output-file", net_xml]
+    cmd = [nc, "--osm-files", src_osm, "--output-file", net_xml]
     for flag, val in CONFIG["netconvert_flags"].items():
         cmd.append(flag)
         if val is not None:
-            cmd.append(str(val))
+            cmd.append(str(val).replace("{SUMO_HOME}", sumo_home))
     log = os.path.join(args.work, "netconvert.log")
-    print(f"[A1] netconvert -> {net_xml}  (warnings -> {log})")
+    print(f"[A1] netconvert -> {net_xml}  (stderr -> {log})")
     t0 = time.time()
     with open(log, "w") as lf:
         r = subprocess.run(cmd, stderr=lf, stdout=subprocess.DEVNULL)
     if r.returncode != 0:
         die(f"netconvert failed (rc={r.returncode}) — see {log}")
-    warn = sum(1 for line in open(log, errors="replace") if "Warning" in line)
-    print(f"[A1] done in {time.time()-t0:.1f}s, {warn} warnings in {log}")
+    # surface a warning summary: these junctions deadlock later
+    kinds = {}
+    for line in open(log, errors="replace"):
+        if "Warning" in line:
+            key = line.split("Warning:")[-1].strip()[:60]
+            kinds[key] = kinds.get(key, 0) + 1
+    print(f"[A1] done in {time.time()-t0:.1f}s — {sum(kinds.values())} warnings, "
+          f"top kinds:")
+    for k, n in sorted(kinds.items(), key=lambda kv: -kv[1])[:6]:
+        print(f"       {n:5d}x {k}")
     return net_xml
 
 
@@ -328,10 +367,10 @@ def stage_build(args, lanes, lane_order, junctions, connections, tls, tls_order)
             dropped.append((lid, "passenger-disallowed"))
             l["drop"] = True
             continue
-        if not l["internal"] and l["length"] < CONFIG["min_lane_length_m"]:
-            dropped.append((lid, "too-short"))
-            l["drop"] = True
-            continue
+        # NOTE: short lanes are NOT dropped. netconvert emits 0.2 m stub
+        # edges inside joined junction clusters that carry the only
+        # connectivity between multi-lane approaches; dropping them severs
+        # the graph (hundreds of interior dead-ends).
         rp = resample([(p[0], p[1]) for p in l["gpts"]], spacing)
         if rp is None:
             dropped.append((lid, "degenerate-shape"))
@@ -381,34 +420,49 @@ def stage_build(args, lanes, lane_order, junctions, connections, tls, tls_order)
     for ci, c in enumerate(conns):
         succ[c["from"]].append(ci)
 
-    # conflicts: junction response matrices. Link indices are assigned over
-    # the junction's FULL pre-drop connection list (document order), so
-    # dropping bus/taxi lanes can't desynchronise the request-count check;
-    # conflicts are then recorded between surviving pairs only.
-    jconn_all = {}
+    # conflicts: junction response matrices. The junction link index is
+    # NOT connection document order (documents group by from-edge, links
+    # follow incLanes order). It IS encoded in the via id: internal edges
+    # are named ':J_<firstLink>' and a multi-lane internal edge covers
+    # consecutive links, so link = via edge number + via lane sub-index
+    # (verified against tls linkIndex attributes). Connections FROM
+    # internal lanes are continuation pieces across split junction paths,
+    # not links — excluded. Link indices are taken over the FULL pre-drop
+    # connection list; conflicts are recorded between surviving pairs only,
+    # so no exported index can dangle.
+    jconn_all = {}                       # jid -> {link_index: raw_i}
     for raw_i, c in enumerate(connections):
         vid = c["via"]
-        if not vid:
+        if not vid or c["from"].startswith(":"):
             continue
-        jid = vid[1:].rsplit("_", 2)[0]   # ':J123_4_0' -> 'J123'
-        jconn_all.setdefault(jid, []).append(raw_i)
+        jid, edge_num, lane_sub = vid[1:].rsplit("_", 2)  # ':J_4_1'
+        jconn_all.setdefault(jid, {})[int(edge_num) + int(lane_sub)] = raw_i
     raw_to_conn = {c["raw_i"]: ci for ci, c in enumerate(conns)}
     bad_junctions = 0
     conflict = [[] for _ in conns]
-    for jid, raw_list in jconn_all.items():
+    for jid, li_map in jconn_all.items():
         j = junctions.get(jid)
-        if j is None or len(j["requests"]) != len(raw_list):
-            if any(r in raw_to_conn for r in raw_list):
+        nreq = len(j["requests"]) if j is not None else 0
+        # derived link indices must be exactly 0..nreq-1, else the mapping
+        # is unproven: flag every surviving connection fail-closed (bit 7)
+        # so the runtime yields to anything in the junction instead of
+        # silently crossing.
+        if j is None or sorted(li_map) != list(range(nreq)):
+            live_cis = [raw_to_conn[r] for r in li_map.values()
+                        if r in raw_to_conn]
+            if live_cis:
                 bad_junctions += 1
+                for ci in live_cis:
+                    conns[ci]["dir"] |= 0x80
             continue
-        for li, raw_i in enumerate(raw_list):
-            ci = raw_to_conn.get(raw_i)
+        for li in range(nreq):
+            ci = raw_to_conn.get(li_map[li])
             if ci is None:
                 continue
             response = j["requests"][li][0]
             n = len(response)
-            for other_li, other_raw in enumerate(raw_list):
-                other_ci = raw_to_conn.get(other_raw)
+            for other_li in range(nreq):
+                other_ci = raw_to_conn.get(li_map[other_li])
                 # response string is indexed from the RIGHT (SUMO convention)
                 if other_ci is not None and other_li != li and other_li < n \
                         and response[n - 1 - other_li] == "1":
@@ -420,11 +474,14 @@ def stage_build(args, lanes, lane_order, junctions, connections, tls, tls_order)
         c["tls"] = tls_index.get(c["tl"], NONE_U16) if c["tl"] else NONE_U16
         c["link"] = int(c["linkIndex"]) if c["linkIndex"] is not None else NONE_U16
 
-    # spawn weights: internal lanes never spawn; weight scales with the lane's
-    # speed class so avingudes see more traffic than alley lanes
-    for lid in live:
+    # spawn weights: internal lanes never spawn; neither do dead-end lanes
+    # (a spawned car must have somewhere to go — culs-de-sac and lane-drop
+    # pockets are reachable by routing, just not spawn points). Weight
+    # scales with the lane's speed class so avingudes see more traffic
+    # than alley lanes.
+    for i, lid in enumerate(live):
         l = lanes[lid]
-        if l["internal"]:
+        if l["internal"] or not succ[i]:
             l["spawn"] = 0.0
         else:
             l["spawn"] = max(0.3, min(3.0, l["speed"] / 8.33)) * l["length"] / 100.0
@@ -619,7 +676,11 @@ Little-endian throughout. Produced by `tools/build_lane_graph.py`.
 11. `conn_via` — u32 × C, junction-internal lane index or `0xFFFFFFFF`.
     Cars traverse from→via→to; the via lane is the geometry across the
     junction.
-12. `conn_dir` — u8 × C: 0 straight, 1 left, 2 right, 3 turn, 4 other.
+12. `conn_dir` — u8 × C: low bits 0 straight, 1 left, 2 right, 3 turn,
+    4 other. Bit 7 = the junction's conflict data could not be mapped;
+    the runtime must FAIL CLOSED on such connections (yield to any car
+    inside the junction) and rely on the deadlock breaker, never cross
+    blind.
 13. `conn_tls` — u16 × C, traffic-light index or `0xFFFF`.
 14. `conn_link` — u16 × C, linkIndex into the tls state string, `0xFFFF`
     when uncontrolled.
@@ -647,6 +708,9 @@ def main():
     ap.add_argument("--work", default="work")
     ap.add_argument("--out", default="out")
     ap.add_argument("--manifest", default=MANIFEST_DEFAULT)
+    ap.add_argument("--bbox", default="",
+                    help="lonmin,latmin,lonmax,latmax slice; 'full' = whole "
+                         "extract; default = central Eixample")
     ap.add_argument("--limit-lanes", type=int, default=0,
                     help="keep only the N normal lanes nearest the origin")
     ap.add_argument("--force", action="store_true", help="redo conversion steps")

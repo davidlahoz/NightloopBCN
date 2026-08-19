@@ -82,7 +82,7 @@ func prewarm(car_x: float, car_z: float) -> void:
 			for path in _tiles[key]:
 				var scene: PackedScene = ResourceLoader.load(path)
 				if scene != null:
-					_add_scene(holder, scene)
+					_add_scene(holder, scene, key)
 	_rescan()
 
 
@@ -94,11 +94,11 @@ func _make_holder(key: Vector2i) -> Node3D:
 	return holder
 
 
-func _add_scene(holder: Node3D, scene: PackedScene) -> void:
+func _add_scene(holder: Node3D, scene: PackedScene, key: Vector2i) -> void:
 	var inst := scene.instantiate()
 	# world-space vertices: identity transform, per the data contract
 	holder.add_child(inst)
-	_apply_material_overrides(inst)
+	_apply_material_overrides(inst, key)
 
 
 ## HOOK — the glbs ship placeholder-colored materials named mat_road,
@@ -113,9 +113,22 @@ var _road_mat: ShaderMaterial
 
 func _build_materials() -> void:
 	var facade_shader: Shader = load("res://shaders/barcelona_facade.gdshader")
-	var road_shader: Shader = load("res://shaders/barcelona_road.gdshader")
+	# ground: classified per pixel from the baked masks (asphalt / paving /
+	# grass / bike lane); one base material, duplicated per tile with that
+	# tile's mask + origin
 	_road_mat = ShaderMaterial.new()
-	_road_mat.shader = road_shader
+	_road_mat.shader = load("res://shaders/barcelona_ground.gdshader")
+	for pair in [["asphalt", "Road007"], ["paving", "PavingStones099"],
+			["grass", "Grass001"]]:
+		_road_mat.set_shader_parameter(pair[0] + "_alb",
+			load("res://assets/textures/ground/%s_color.jpg" % pair[1]))
+		_road_mat.set_shader_parameter(pair[0] + "_nrm",
+			load("res://assets/textures/ground/%s_normal.jpg" % pair[1]))
+		_road_mat.set_shader_parameter(pair[0] + "_rgh",
+			load("res://assets/textures/ground/%s_rough.jpg" % pair[1]))
+	var blank := Image.create(1, 1, false, Image.FORMAT_RGB8)
+	blank.fill(Color(0, 0, 0))
+	_road_mat.set_shader_parameter("class_mask", ImageTexture.create_from_image(blank))
 	var wall := func(tint: Color) -> ShaderMaterial:
 		var m := ShaderMaterial.new()
 		m.shader = facade_shader
@@ -144,11 +157,40 @@ func apply_environment(params: Dictionary) -> void:
 
 ## Per-frame physical surface state.
 func set_wetness(wet: float, pud: float) -> void:
+	_wet = wet
+	_pud = pud
 	_road_mat.set_shader_parameter("wetness", wet)
 	_road_mat.set_shader_parameter("puddle_level", pud)
+	for key in _ground_mats:
+		_ground_mats[key].set_shader_parameter("wetness", wet)
+		_ground_mats[key].set_shader_parameter("puddle_level", pud)
 
 
-func _apply_material_overrides(inst: Node) -> void:
+var _ground_mats: Dictionary = {}   # tile key -> per-tile ground material
+var _wet := 0.15
+var _pud := 0.22
+
+
+## The ground material for one tile: the base with that tile's baked
+## classification mask (barcelona/masks/, .gdignore'd — loaded raw).
+func _ground_mat_for(key: Vector2i) -> ShaderMaterial:
+	if _ground_mats.has(key):
+		return _ground_mats[key]
+	var m: ShaderMaterial = _road_mat.duplicate()
+	m.set_shader_parameter("tile_origin", Vector2(key.x * TILE, key.y * TILE))
+	var mp := ProjectSettings.globalize_path(
+		"res://barcelona/masks/tile_%d_%d.png" % [key.x, key.y])
+	if FileAccess.file_exists(mp):
+		var img := Image.load_from_file(mp)
+		if img != null:
+			m.set_shader_parameter("class_mask", ImageTexture.create_from_image(img))
+	m.set_shader_parameter("wetness", _wet)
+	m.set_shader_parameter("puddle_level", _pud)
+	_ground_mats[key] = m
+	return m
+
+
+func _apply_material_overrides(inst: Node, key: Vector2i) -> void:
 	var stack: Array[Node] = [inst]
 	while not stack.is_empty():
 		var n: Node = stack.pop_back()
@@ -157,7 +199,11 @@ func _apply_material_overrides(inst: Node) -> void:
 		if n is MeshInstance3D and n.mesh != null:
 			for si in n.mesh.get_surface_count():
 				var mat: Material = n.mesh.surface_get_material(si)
-				if mat != null and _mat_overrides.has(mat.resource_name):
+				if mat == null:
+					continue
+				if mat.resource_name == "mat_road":
+					n.set_surface_override_material(si, _ground_mat_for(key))
+				elif _mat_overrides.has(mat.resource_name):
 					n.set_surface_override_material(si, _mat_overrides[mat.resource_name])
 
 
@@ -187,6 +233,7 @@ func _rescan() -> void:
 		if _grid_dist(key) > DROP:
 			_live[key].queue_free()
 			_live.erase(key)
+			_ground_mats.erase(key)
 	_pending = _pending.filter(func(e): return _grid_dist(e[0]) <= RADIUS)
 
 
@@ -227,4 +274,4 @@ func _poll_loads() -> void:
 		if holder == null:
 			holder = _make_holder(key)
 		if scene != null:
-			_add_scene(holder, scene)
+			_add_scene(holder, scene, key)

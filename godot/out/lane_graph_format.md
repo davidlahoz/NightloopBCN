@@ -37,7 +37,11 @@ Little-endian throughout. Produced by `tools/build_lane_graph.py`.
 11. `conn_via` — u32 × C, junction-internal lane index or `0xFFFFFFFF`.
     Cars traverse from→via→to; the via lane is the geometry across the
     junction.
-12. `conn_dir` — u8 × C: 0 straight, 1 left, 2 right, 3 turn, 4 other.
+12. `conn_dir` — u8 × C: low bits 0 straight, 1 left, 2 right, 3 turn,
+    4 other. Bit 7 = the junction's conflict data could not be mapped;
+    the runtime must FAIL CLOSED on such connections (yield to any car
+    inside the junction) and rely on the deadlock breaker, never cross
+    blind.
 13. `conn_tls` — u16 × C, traffic-light index or `0xFFFF`.
 14. `conn_link` — u16 × C, linkIndex into the tls state string, `0xFFFF`
     when uncontrolled.

@@ -8,8 +8,9 @@ extends MVehicle3D
 ## steering/engine_force/brake are produced from the kinematic sim's IDM
 ## intent. MAV + Godot vehicle physics drive the wheels; IDM decides intent.
 ##
-## Convention: VehicleBody3D forward is -Z, our car models face +Z, so the
-## visual is mounted rotated PI around Y by the spawner.
+## Convention: the body drives toward its +Z under positive engine_force
+## (verified empirically), matching the fleet's +Z-forward car models —
+## no rotation flips anywhere in the promoted pipeline.
 
 var target_speed := 0.0        # m/s, set from IDM every frame
 var target_point := Vector3.ZERO   # lookahead point on the lane
@@ -30,8 +31,8 @@ func _ready() -> void:
 func _physics_process(_delta: float) -> void:
 	var v := linear_velocity.length()
 	var local := to_local(target_point)
-	# forward is -Z: steer toward the lookahead, positive turns left
-	steering = clampf(atan2(-local.x, maxf(-local.z, 0.5)), -MAX_STEER, MAX_STEER)
+	# forward is +Z: steer toward the lookahead
+	steering = clampf(atan2(local.x, maxf(local.z, 0.5)), -MAX_STEER, MAX_STEER)
 	var err := target_speed - v
 	if err > 0.25:
 		# positive engine_force drives the body toward its -Z forward

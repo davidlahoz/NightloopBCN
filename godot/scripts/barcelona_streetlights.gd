@@ -30,6 +30,9 @@ var _heads := PackedVector3Array()
 var _pool: Array[OmniLight3D] = []
 var _scan := Vector2(INF, INF)
 var _light_accum := 0.0
+var _graph_seen := false
+var _pole_bodies: Array[StaticBody3D] = []
+var _pole_shape: CylinderShape3D
 
 
 func _init(sn: StreetNames) -> void:
@@ -66,6 +69,9 @@ func set_intensity(v: float) -> void:
 func update(dt: float, car_x: float, car_z: float) -> void:
 	if not _sn.is_ready():
 		return
+	if not _graph_seen and TrafficManager.graph.ready:
+		_graph_seen = true
+		_scan = Vector2(INF, INF)   # re-place poles now that lane widths exist
 	if Vector2(car_x - _scan.x, car_z - _scan.y).length() > RESCAN_DIST:
 		_scan = Vector2(car_x, car_z)
 		_rescan(car_x, car_z)
@@ -85,6 +91,13 @@ func _rescan(cx: float, cz: float) -> void:
 		if done_ways.has(wi):
 			continue
 		done_ways[wi] = true
+		# poles stand just past the carriageway edge, measured from the
+		# traffic lane graph (the road tiles are flat — no kerb to raycast)
+		var wa := _sn.seg_a(si)
+		var wb := _sn.seg_b(si)
+		var wdir := (wb - wa).normalized()
+		var pole_off := _carriageway_half_width((wa + wb) * 0.5, wdir) + 1.4
+		pole_off = clampf(pole_off, SIDE_OFFSET, 15.0)
 		# walk the whole way, dropping poles every SPACING metres
 		var acc := SPACING * 0.5
 		var side := 1.0
@@ -104,11 +117,10 @@ func _rescan(cx: float, cz: float) -> void:
 				if Vector2(p.x - cx, p.y - cz).length() > RADIUS:
 					continue
 				var right := Vector2(-fwd.y, fwd.x) * side
-				# narrow streets: pull the pole toward the kerb if the wide
-				# offset lands inside a building
+				# fall back inward when the wide offset lands inside a building
 				var pp := Vector2.ZERO
 				var hit := {}
-				for offset in [SIDE_OFFSET, 2.4]:
+				for offset in [pole_off, SIDE_OFFSET, 2.4]:
 					pp = p + right * offset
 					var q := PhysicsRayQueryParameters3D.create(
 						Vector3(pp.x, 20.0, pp.y), Vector3(pp.x, -8.0, pp.y))
@@ -128,6 +140,55 @@ func _rescan(cx: float, cz: float) -> void:
 	_mm.instance_count = transforms.size()
 	for i in transforms.size():
 		_mm.set_instance_transform(i, transforms[i])
+	# collision: a slim static cylinder per pole so the hero car can hit them
+	for b in _pole_bodies:
+		b.queue_free()
+	_pole_bodies.clear()
+	if _pole_shape == null:
+		_pole_shape = CylinderShape3D.new()
+		_pole_shape.radius = 0.14
+		_pole_shape.height = 5.0
+	for xf in transforms:
+		var body := StaticBody3D.new()
+		var cs := CollisionShape3D.new()
+		cs.shape = _pole_shape
+		cs.position = Vector3(0, 2.5, 0)
+		body.add_child(cs)
+		body.transform = xf
+		add_child(body)
+		_pole_bodies.append(body)
+
+
+## Half-width of the carriageway around point p (way direction wdir):
+## the farthest parallel traffic lane's perpendicular offset from the way
+## centreline, plus half a lane. Falls back to the classic narrow offset
+## when the lane graph has nothing there (paths, stairs, private roads).
+func _carriageway_half_width(p: Vector2, wdir: Vector2) -> float:
+	var g: LaneGraph = TrafficManager.graph
+	if g == null or not g.ready:
+		return SIDE_OFFSET - 1.4
+	var best := -1.0
+	var cell := Vector2i(floori(p.x / LaneGraph.GRID), floori(p.y / LaneGraph.GRID))
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var key := Vector2i(cell.x + dx, cell.y + dz)
+			if not g.spawn_grid.has(key):
+				continue
+			for lane in g.spawn_grid[key]:
+				var sp := g.lane_pos(lane, 0.0)
+				if Vector2(sp.x - p.x, sp.z - p.y).length() > 170.0:
+					continue
+				var L: float = g.lane_length[lane]
+				for f in [0.0, 0.33, 0.66, 1.0]:
+					var q := g.lane_pos(lane, L * f)
+					if Vector2(q.x - p.x, q.z - p.y).length() > 14.0:
+						continue
+					var t := g.lane_tangent(lane, L * f)
+					if absf(t.x * wdir.x + t.z * wdir.y) < 0.8:
+						continue   # crossing street, not this carriageway
+					var perp := absf((q.x - p.x) * -wdir.y + (q.z - p.y) * wdir.x)
+					best = maxf(best, perp)
+	return (best + 1.6) if best >= 0.0 else (SIDE_OFFSET - 1.4)
 
 
 func _assign_lights(cx: float, cz: float) -> void:

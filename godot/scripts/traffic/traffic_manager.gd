@@ -23,7 +23,7 @@ extends Node3D
 @export var car_length := 4.5
 
 # IDM
-const IDM_T := 1.2
+const IDM_T := 0.9
 const IDM_A := 1.5
 const IDM_B := 2.0
 const IDM_S0 := 2.0
@@ -53,7 +53,9 @@ var c_y := PackedFloat32Array()
 var c_yaw := PackedFloat32Array()
 var c_variant := PackedInt32Array()
 var c_wait := PackedFloat32Array()
+var c_accel := PackedFloat32Array()   # last IDM accel (brake-light state)
 var c_alive := PackedByteArray()
+var night_lights := 1.0               # env headlight level, set by main
 var c_promoted: Array = []            # TrafficMVehicle or null
 var _free: Array[int] = []
 var alive_count := 0
@@ -71,13 +73,22 @@ var _rng := RandomNumberGenerator.new()
 
 # visuals
 var _variants: Array = []             # {mesh: ArrayMesh, wheel_r, template: Node3D}
+var _variant_wcum: Array[float] = []  # cumulative spawn weights (trucks rarer)
+var _variant_wsum := 0.0
+var _variant_len: Array[float] = []   # body length per variant (IDM gaps)
+var c_len := PackedFloat32Array()     # per-car body length
 var _mm_cars: Array = []              # MultiMeshInstance3D per variant
 var _mm_lights: MultiMeshInstance3D
+var _mm_signals: MultiMeshInstance3D
 var _spots: Array[SpotLight3D] = []
 
 # debug
 var overlay: Label
 var debug_lanes := false
+var _orient_test := false
+var _orient_one := -1
+var _follow_test := false
+var _with_promo := false
 var _debug_mesh: MeshInstance3D
 var _debug_accum := 0.0
 var tick_ms := 0.0
@@ -88,11 +99,53 @@ var stuck_log: Array[String] = []     # rolling, newest last
 func setup(p_player: Node) -> void:
 	player = p_player
 	_rng.randomize()
-	debug_lanes = OS.get_cmdline_user_args().has("--lanes")
+	var uargs := OS.get_cmdline_user_args()
+	debug_lanes = uargs.has("--lanes")
+	if uargs.has("--single-car"):
+		target_population = 1
+	for a in uargs:
+		if a.begins_with("--traffic="):
+			target_population = maxi(int(a.substr(10)), 0)
+	if target_population != 220:
+		print("[traffic] population override: %d" % target_population)
+	_orient_test = uargs.has("--orient-test")
+	_follow_test = uargs.has("--follow-test")
+	_with_promo = uargs.has("--with-promo")
+	if _follow_test:
+		target_population = 2
+	for a in uargs:
+		if a.begins_with("--orient-one="):
+			_orient_test = true
+			_orient_one = int(a.substr(13))
 	WorkerThreadPool.add_task(func(): graph.load_bin(), false, "nl_lane_graph")
 	_build_visual_pools()
 	_build_overlay()
 	enabled = true
+	if uargs.has("--showroom"):
+		# render a whole vehicle pack as-is for visual identification
+		target_population = 0
+		var pk: PackedScene = load("res://assets/car/truck-minipack.glb")
+		var pr: Node3D = pk.instantiate()
+		pr.position = player.pos + Vector3(-12.0, 45.0, 16.0)   # above roofs
+		add_child(pr)
+		print("[traffic] showroom: truck pack at player")
+		return
+	if _orient_test:
+		# C3 orientation test: every variant at IDENTITY in a row. The fleet
+		# contract is nose = +Z, so in a north-up top-down view every nose
+		# must point screen-down. No cars are simulated.
+		target_population = 0
+		for i in _variants.size():
+			if _orient_one >= 0 and i != _orient_one:
+				continue
+			var mi := MeshInstance3D.new()
+			mi.mesh = _variants[i].mesh
+			var off := Vector3(0, 0.2, -10.0) if _orient_one >= 0 \
+				else Vector3((i - _variants.size() / 2.0) * 4.5, 0.2, -8.0)
+			mi.transform = Transform3D(Basis.IDENTITY, player.pos + off)
+			add_child(mi)
+		print("[traffic] orient test: variant %s at identity, +Z = forward"
+				% (str(_orient_one) if _orient_one >= 0 else "row"))
 
 
 func _ready() -> void:
@@ -152,6 +205,7 @@ func _ensure_arrays() -> void:
 	c_v0.resize(MAX_CARS); c_T.resize(MAX_CARS); c_next.resize(MAX_CARS)
 	c_exit.resize(MAX_CARS); c_y.resize(MAX_CARS); c_yaw.resize(MAX_CARS)
 	c_variant.resize(MAX_CARS); c_wait.resize(MAX_CARS)
+	c_accel.resize(MAX_CARS); c_len.resize(MAX_CARS)
 	c_px.resize(MAX_CARS); c_pz.resize(MAX_CARS)
 	_xf_cache.resize(MAX_CARS)
 	c_alive.resize(MAX_CARS)
@@ -238,7 +292,7 @@ func _sim(dt: float, _ppos: Vector3) -> void:
 			# leader in this lane
 			if i + 1 < arr.size():
 				var li := arr[i + 1]
-				gap = c_dist[li] - c_dist[ci] - car_length
+				gap = c_dist[li] - c_dist[ci] - c_len[li]
 				v_lead = c_speed[li]
 			else:
 				# look across the boundary into the chosen next lane
@@ -248,7 +302,7 @@ func _sim(dt: float, _ppos: Vector3) -> void:
 					var narr: PackedInt32Array = _lane_cars[nxt]
 					if narr.size() > 0:
 						var li2 := narr[0]
-						gap = remaining + c_dist[li2] - car_length
+						gap = remaining + c_dist[li2] - c_len[li2]
 						v_lead = c_speed[li2]
 
 			# junction gate on normal lanes
@@ -283,6 +337,7 @@ func _sim(dt: float, _ppos: Vector3) -> void:
 				accel = IDM_A * (1.0 - pow(v / maxf(v0, 0.1), 4.0))
 			v = maxf(v + accel * dt, 0.0)
 			c_speed[ci] = v
+			c_accel[ci] = accel
 			c_dist[ci] += v * dt
 			if v > 1.0:
 				c_wait[ci] = maxf(c_wait[ci], 0.0) if c_wait[ci] > -1.0 else c_wait[ci] + dt
@@ -336,8 +391,26 @@ func _junction_hold(ci: int, lane: int, remaining: float) -> bool:
 	var cn := _choose_conn(ci, lane)
 	if cn < 0:
 		return false
+	if graph.conn_dir[cn] & 0x80:
+		# offline conflict mapping failed at this junction (conn_dir bit 7):
+		# FAIL CLOSED — yield to anything physically in the box (separation
+		# pass), with the standard stuck-mercy escape. Never cross blind.
+		return _sep_gap.size() == MAX_CARS and _sep_gap[ci] < remaining + 10.0
+	# blocking-box rule: never enter the junction when the exit lane has no
+	# room to receive the car — a green is no licence to stop inside the box.
+	# Only the 15 s stuck-mercy in _sim overrides this.
+	var to := graph.conn_to[cn]
+	if remaining < 6.0 and _lane_cars.has(to):
+		var tarr: PackedInt32Array = _lane_cars[to]
+		if tarr.size() > 0:
+			var fc := tarr[0]
+			if c_dist[fc] < car_length + 0.7 and c_speed[fc] < 0.5:
+				return true
 	var sig := graph.signal_state(cn, _time)
 	if sig == CH_r or sig == CH_y:
+		# a red is never a deadlock — the program cycles. Don't let the
+		# stuck-mercy force cars through it: reset the clock below 15 s.
+		c_wait[ci] = minf(c_wait[ci], STUCK_SECONDS - 3.0)
 		return true
 	if sig == CH_G:
 		return false   # protected green: signal already separates conflicts
@@ -348,6 +421,7 @@ func _junction_hold(ci: int, lane: int, remaining: float) -> bool:
 	var x1 := graph.conn_conflict_start[cn + 1]
 	var stalled_only := true
 	var blocked := false
+	var min_blk_lane := 0x7FFFFFFF   # lowest waiting lane wins the tie-break
 	for x in range(x0, x1):
 		var oc := graph.conflicts[x]
 		var via := graph.conn_via[oc]
@@ -366,8 +440,19 @@ func _junction_hold(ci: int, lane: int, remaining: float) -> bool:
 				if (graph.lane_length[from] - c_dist[li]) / lv < TTC_LIMIT:
 					blocked = true
 					stalled_only = false
-	if blocked and stalled_only and c_wait[ci] > 4.0:
-		return false   # deadlock breaker: every blocker is itself stopped
+				elif c_speed[li] < 0.4 \
+						and graph.lane_length[from] - c_dist[li] < JUNCTION_LOOK:
+					# a STOPPED approach car never blocks gap acceptance — it
+					# only competes in the deadlock tie-break below
+					min_blk_lane = mini(min_blk_lane, from)
+	if blocked and stalled_only and c_wait[ci] > 3.0:
+		# per-junction deadlock breaker: every blocker is itself stopped —
+		# the car on the lowest lane id proceeds, the rest keep waiting
+		return lane > min_blk_lane
+	if not blocked and c_wait[ci] > 3.0 and min_blk_lane != 0x7FFFFFFF:
+		# mutual-yield stand-off: several approaches waiting on each other —
+		# enter the box one at a time, lowest lane id first
+		return lane > min_blk_lane
 	return blocked
 
 
@@ -375,37 +460,51 @@ func _do_transfers(ppos: Vector3) -> void:
 	for ci in _transfers:
 		if c_alive[ci] == 0:
 			continue
-		var lane := c_lane[ci]
-		var overflow := c_dist[ci] - graph.lane_length[lane]
-		var next_lane := -1
-		if graph.lane_flags[lane] & 1 != 0:
-			var ex := c_exit[ci]
-			next_lane = graph.conn_to[ex] if ex >= 0 else -1
-			c_exit[ci] = -1
-		else:
-			var cn := _choose_conn(ci, lane)
-			if cn >= 0:
-				var via := graph.conn_via[cn]
-				if via >= 0:
-					next_lane = via
-					c_exit[ci] = cn
-				else:
-					next_lane = graph.conn_to[cn]
-			c_next[ci] = -1
-		if next_lane < 0:
-			_log_stuck(ci, lane, "dead end, despawned")
-			_despawn(ci)
-			continue
-		_lane_remove(lane, ci)
-		c_lane[ci] = next_lane
-		c_dist[ci] = minf(overflow, maxf(graph.lane_length[next_lane] - 0.1, 0.0))
-		_lane_insert(next_lane, ci)
+		# chain across as many boundaries as the overflow demands: junction
+		# clusters contain 0.2 m stub lanes a car crosses several of in one
+		# tick — clamping to one boundary per tick made cars lurch there
+		for _hop in 6:
+			var lane := c_lane[ci]
+			var llen := graph.lane_length[lane]
+			if c_dist[ci] < llen:
+				break
+			var overflow := c_dist[ci] - llen
+			var next_lane := -1
+			if graph.lane_flags[lane] & 1 != 0:
+				var ex := c_exit[ci]
+				next_lane = graph.conn_to[ex] if ex >= 0 else -1
+				c_exit[ci] = -1
+			else:
+				var cn := _choose_conn(ci, lane)
+				if cn >= 0:
+					var via := graph.conn_via[cn]
+					if via >= 0:
+						next_lane = via
+						c_exit[ci] = cn
+					else:
+						next_lane = graph.conn_to[cn]
+				c_next[ci] = -1
+			if next_lane < 0:
+				_log_stuck(ci, lane, "dead end, despawned")
+				_despawn(ci)
+				break
+			_lane_remove(lane, ci)
+			c_lane[ci] = next_lane
+			c_dist[ci] = overflow
+			_lane_insert(next_lane, ci)
+		if c_alive[ci] != 0:
+			# a car that somehow still overflows (6 chained micro-lanes) waits
+			# at the end of its current lane — never teleport it
+			var lane2 := c_lane[ci]
+			c_dist[ci] = minf(c_dist[ci], graph.lane_length[lane2])
 
 
 # --------------------------------------------------------------------------
 # spawn / despawn
 # --------------------------------------------------------------------------
 func _spawn_despawn(ppos: Vector3) -> void:
+	if _follow_test:
+		return   # the two test cars live wherever their lane is
 	# despawn far cars (position cache from the visuals pass)
 	for ci in MAX_CARS:
 		if c_alive[ci] == 0:
@@ -447,7 +546,12 @@ func _initial_fill(ppos: Vector3) -> void:
 			var key := Vector2i(cc.x + dx, cc.y + dz)
 			if graph.spawn_grid.has(key):
 				_spawn_pool.append_array(graph.spawn_grid[key])
+	if _follow_test:
+		_spawn_follow_test(ppos)
+		return
 	if _spawn_pool.is_empty():
+		push_warning("[traffic] no spawnable lanes within %.0f m of (%.0f, %.0f) — player outside lane-graph coverage" % [
+			spawn_max, ppos.x, ppos.z])
 		return
 	var want := target_population
 	var tries := 6000
@@ -456,6 +560,83 @@ func _initial_fill(ppos: Vector3) -> void:
 		if _try_spawn(ppos, true):
 			want -= 1
 	print("[traffic] initial fill: %d cars" % alive_count)
+
+
+## C3 two-car test: a slow leader and a normal follower on ONE long lane
+## near the player. The follower must brake behind the leader, never
+## overlap it, and the gap must stabilise.
+func _spawn_follow_test(ppos: Vector3) -> void:
+	var best := -1
+	var best_d := 1e9
+	for lane in graph.lane_count:
+		if graph.lane_flags[lane] & 1 != 0 or graph.lane_length[lane] < 130.0:
+			continue
+		if graph.lane_spawn_weight[lane] <= 0.0:
+			continue
+		var p := graph.lane_pos(lane, 0.0)
+		var dd := Vector2(p.x - ppos.x, p.z - ppos.z).length()
+		if dd < best_d:
+			best_d = dd
+			best = lane
+	if best < 0:
+		print("[traffic] follow-test: no long lane nearby")
+		return
+	for k in 2:
+		var ci: int = _free.pop_back()
+		var d := 60.0 if k == 0 else 10.0
+		var tan := graph.lane_tangent(best, d)
+		var p2 := graph.lane_pos(best, d)
+		c_alive[ci] = 1
+		c_lane[ci] = best
+		c_dist[ci] = d
+		c_speed[ci] = 3.0
+		c_v0[ci] = 0.35 if k == 0 else 1.0   # slow leader, normal follower
+		c_T[ci] = 1.0
+		c_next[ci] = -1
+		c_exit[ci] = -1
+		c_y[ci] = ppos.y
+		c_yaw[ci] = atan2(tan.x, tan.z)
+		c_variant[ci] = k
+		c_len[ci] = _variant_len[k] if k < _variant_len.size() else car_length
+		c_wait[ci] = 0.0
+		c_promoted[ci] = null
+		c_px[ci] = p2.x
+		c_pz[ci] = p2.z
+		_xf_cache[ci] = Transform3D(Basis(Vector3.UP, c_yaw[ci]), Vector3(p2.x, c_y[ci], p2.z))
+		_lane_insert(best, ci)
+		alive_count += 1
+	print("[traffic] follow-test on lane %d (%s), len %.0f m" % [
+		best, graph.lane_id(best), graph.lane_length[best]])
+
+
+## One line of car state for --probe runs (single-car / follow-test).
+func debug_cars() -> String:
+	var parts: Array[String] = []
+	var rows: Array[int] = []
+	for ci in MAX_CARS:
+		if c_alive[ci] == 1:
+			rows.append(ci)
+			if rows.size() >= 2:
+				break
+	for ci in rows:
+		var sig := "-"
+		if c_next[ci] >= 0:
+			sig = String.chr(graph.signal_state(c_next[ci], _time))
+		var promo := ""
+		if c_promoted[ci] != null:
+			var body: TrafficMVehicle = c_promoted[ci]
+			var lp := graph.lane_pos(c_lane[ci], c_dist[ci])
+			promo = " PROMO bv=%.1f by=%.1f err=%.1f steer=%.2f ef=%.0f" % [
+				body.linear_velocity.length(), body.global_position.y,
+				Vector2(body.global_position.x - lp.x,
+					body.global_position.z - lp.z).length(),
+				body.steering, body.engine_force]
+		parts.append("car%d lane=%d d=%.1f/%.1f v=%.1f wait=%.1f sig=%s%s" % [
+			ci, c_lane[ci], c_dist[ci], graph.lane_length[c_lane[ci]],
+			c_speed[ci], c_wait[ci], sig, promo])
+	if rows.size() == 2 and c_lane[rows[0]] == c_lane[rows[1]]:
+		parts.append("gap=%.1f" % absf(c_dist[rows[1]] - c_dist[rows[0]]))
+	return "  ".join(parts) if not parts.is_empty() else "no cars"
 
 
 func _try_spawn(ppos: Vector3, relaxed := false) -> bool:
@@ -478,10 +659,10 @@ func _try_spawn(ppos: Vector3, relaxed := false) -> bool:
 			break
 	if not ok:
 		return false
-	# only lanes flowing toward the player (any direction on the boot fill)
+	# any flow direction: traffic roams the city instead of converging on
+	# the player. Density is kept up by the annulus spawn/despawn loop —
+	# cars that head away simply despawn sooner and are replaced.
 	var tan := graph.lane_tangent(lane, d)
-	if not relaxed and tan.dot(Vector3(ppos.x - p.x, 0.0, ppos.z - p.z).normalized()) < 0.0:
-		return false
 	# gap >= 2x IDM desired headway to every car already on the lane
 	var v0 := graph.lane_speed[lane]
 	var need := 2.0 * (IDM_S0 + v0 * IDM_T) + car_length
@@ -496,13 +677,15 @@ func _try_spawn(ppos: Vector3, relaxed := false) -> bool:
 	c_lane[ci] = lane
 	c_dist[ci] = d
 	c_speed[ci] = v0 * 0.6
-	c_v0[ci] = _rng.randf_range(0.88, 1.12)
+	# cruise at-to-slightly-over the posted limit (city drivers do)
+	c_v0[ci] = _rng.randf_range(1.0, 1.22)
 	c_T[ci] = _rng.randf_range(0.88, 1.12)
 	c_next[ci] = -1
 	c_exit[ci] = -1
 	c_y[ci] = ppos.y
 	c_yaw[ci] = atan2(tan.x, tan.z)
-	c_variant[ci] = _rng.randi_range(0, maxi(_variants.size() - 1, 0))
+	c_variant[ci] = _pick_variant()
+	c_len[ci] = _variant_len[c_variant[ci]] if not _variant_len.is_empty() else car_length
 	c_wait[ci] = 0.0
 	c_promoted[ci] = null
 	c_px[ci] = p.x
@@ -511,6 +694,16 @@ func _try_spawn(ppos: Vector3, relaxed := false) -> bool:
 	_lane_insert(lane, ci)
 	alive_count += 1
 	return true
+
+
+func _pick_variant() -> int:
+	if _variant_wcum.is_empty():
+		return 0
+	var r := _rng.randf() * _variant_wsum
+	for i in _variant_wcum.size():
+		if r <= _variant_wcum[i]:
+			return i
+	return _variant_wcum.size() - 1
 
 
 func _despawn(ci: int) -> void:
@@ -552,6 +745,8 @@ func _lane_remove(lane: int, ci: int) -> void:
 # Tier 0 — promotion to M.A.V.S physics bodies
 # --------------------------------------------------------------------------
 func _update_promotion(ppos: Vector3) -> void:
+	if _follow_test and not _with_promo:
+		return   # C3 follower test measures pure IDM — no physics bodies
 	var near: Array = []
 	for ci in MAX_CARS:
 		if c_alive[ci] == 0:
@@ -585,27 +780,29 @@ func _promote(ci: int) -> void:
 	body.mass = 1200.0
 	var pos := graph.lane_pos(c_lane[ci], c_dist[ci])
 	var tan := graph.lane_tangent(c_lane[ci], c_dist[ci])
-	# body forward is -Z; our yaw convention faces +Z — flip
-	var yaw := atan2(tan.x, tan.z) + PI
+	# body forward is +Z (empirically: positive engine_force drives +Z),
+	# which matches the fleet convention — no rotation flips anywhere
+	var yaw := atan2(tan.x, tan.z)
 	body.basis = Basis(Vector3.UP, yaw)
 	body.position = Vector3(pos.x, c_y[ci] + 0.4, pos.z)
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(1.8, 1.1, 4.3)
+	var mb: AABB = (vdef.mesh as ArrayMesh).get_aabb()
+	box.size = Vector3(clampf(mb.size.x * 0.92, 1.2, 2.6),
+		maxf(mb.size.y * 0.85, 0.9), clampf(mb.size.z * 0.95, 3.0, 8.6))
 	shape.shape = box
-	shape.position = Vector3(0, 0.7, 0)
+	shape.position = Vector3(0, box.size.y * 0.5 + 0.25, 0)
 	body.add_child(shape)
 	var visual: Node3D = vdef.template.duplicate()
-	visual.rotation.y = PI     # model faces +Z, body forward is -Z
 	body.add_child(visual)
 	for wdef in vdef.wheels:
 		var w := VehicleWheel3D.new()
-		w.position = Vector3(-wdef.x, wdef.y + 0.15, -wdef.z)   # rotated frame
+		w.position = Vector3(wdef.x, wdef.y + 0.15, wdef.z)
 		w.wheel_radius = vdef.wheel_r
 		w.wheel_rest_length = 0.15
 		w.suspension_stiffness = 45.0
-		w.use_as_traction = wdef.z < 0.0    # rear wheels in model frame
-		w.use_as_steering = wdef.z > 0.0
+		w.use_as_traction = wdef.z < 0.0    # rear wheels drive
+		w.use_as_steering = wdef.z > 0.0    # front wheels steer
 		body.add_child(w)
 	body.linear_velocity = tan * c_speed[ci]
 	add_child(body)
@@ -669,6 +866,7 @@ func _update_visuals(dt: float, ppos: Vector3) -> void:
 	var counts := PackedInt32Array()
 	counts.resize(_variants.size())
 	var light_count := 0
+	var sig_count := 0
 	var mm_l: MultiMesh = _mm_lights.multimesh
 	var spot_candidates: Array = []
 	var blend := minf(dt / 0.15, 1.0)   # ~0.15 s basis smoothing
@@ -704,6 +902,11 @@ func _update_visuals(dt: float, ppos: Vector3) -> void:
 			if counts[vi] < 64:
 				mmi.multimesh.set_instance_transform(counts[vi], xf)
 				counts[vi] += 1
+			if sig_count < 128:
+				_mm_signals.multimesh.set_instance_transform(sig_count, xf)
+				_mm_signals.multimesh.set_instance_custom_data(
+					sig_count, _signal_state(ci))
+				sig_count += 1
 			spot_candidates.append([d, ci, xf])
 		elif light_count < 256:
 			mm_l.set_instance_transform(light_count, xf)
@@ -712,12 +915,14 @@ func _update_visuals(dt: float, ppos: Vector3) -> void:
 	for vi in _variants.size():
 		(_mm_cars[vi] as MultiMeshInstance3D).multimesh.visible_instance_count = counts[vi]
 	mm_l.visible_instance_count = light_count
+	_mm_lights.visible = night_lights > 0.15   # far imposters are a night LOD
+	_mm_signals.multimesh.visible_instance_count = sig_count
 
-	# a handful of real headlight cones for the nearest cars
+	# a handful of real headlight cones for the nearest cars (night only)
 	spot_candidates.sort_custom(func(a, b): return a[0] < b[0])
 	for i in _spots.size():
 		var s := _spots[i]
-		if i < spot_candidates.size():
+		if i < spot_candidates.size() and night_lights > 0.15:
 			var xf: Transform3D = spot_candidates[i][2]
 			s.global_transform = xf * Transform3D(Basis(Vector3.UP, PI), Vector3(0, 0.7, 2.0))
 			s.visible = true
@@ -725,8 +930,38 @@ func _update_visuals(dt: float, ppos: Vector3) -> void:
 			s.visible = false
 
 
+## Per-car INSTANCE_CUSTOM for the signal quads:
+## r = brake (IDM decel > 0.5 m/s², or held at a stop),
+## g/b = left/right indicator (blinking from 1.5 s before a turn, and
+## through the junction), a = headlights (environment level).
+func _signal_state(ci: int) -> Color:
+	var brake := 1.0 if (c_accel[ci] < -0.5 or c_speed[ci] < 0.3) else 0.0
+	var left := 0.0
+	var right := 0.0
+	var cn := c_next[ci] if c_next[ci] >= 0 else c_exit[ci]
+	if cn >= 0:
+		var dircode := graph.conn_dir[cn] & 0x7F
+		if dircode == 1 or dircode == 2:
+			var lane := c_lane[ci]
+			var on_via := graph.lane_flags[lane] & 1 != 0
+			var rem := graph.lane_length[lane] - c_dist[ci]
+			if on_via or rem < maxf(c_speed[ci], 2.0) * 1.5:
+				var blink := 1.0 if fmod(_time, 0.8) < 0.4 else 0.0
+				if dircode == 1:
+					left = blink
+				else:
+					right = blink
+	return Color(brake, left, right, night_lights)
+
+
 func _build_visual_pools() -> void:
 	_variants = TrafficFleet.build_variants()
+	_variants.append_array(TrafficFleet.build_truck_variants())
+	_variant_wsum = 0.0
+	for vdef in _variants:
+		_variant_wsum += vdef.get("spawn_weight", 1.0)
+		_variant_wcum.append(_variant_wsum)
+		_variant_len.append(maxf((vdef.mesh as ArrayMesh).get_aabb().size.z, 3.4))
 	for vdef in _variants:
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -747,6 +982,16 @@ func _build_visual_pools() -> void:
 	_mm_lights.multimesh = lm
 	_mm_lights.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_mm_lights)
+	var sm := MultiMesh.new()
+	sm.transform_format = MultiMesh.TRANSFORM_3D
+	sm.use_custom_data = true
+	sm.mesh = TrafficFleet.build_signal_quads()
+	sm.instance_count = 128
+	sm.visible_instance_count = 0
+	_mm_signals = MultiMeshInstance3D.new()
+	_mm_signals.multimesh = sm
+	_mm_signals.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_mm_signals)
 	for i in headlight_pool:
 		var s := SpotLight3D.new()
 		s.spot_range = 30.0
@@ -792,7 +1037,7 @@ func _draw_debug_lanes(ppos: Vector3) -> void:
 	im.surface_begin(Mesh.PRIMITIVE_LINES)
 	var drawn := 0
 	for lane in graph.lane_count:
-		if drawn > 500:
+		if drawn > 1500:
 			break
 		var p0 := graph.lane_pos(lane, 0.0)
 		if Vector2(p0.x - ppos.x, p0.z - ppos.z).length() > 220.0:

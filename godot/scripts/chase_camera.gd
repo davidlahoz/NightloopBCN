@@ -29,8 +29,7 @@ var _arm_stretch := 0.0
 var _pos := Vector3(0, 3, -8)
 var _look := Vector3.ZERO
 var _shake_t := 0.0
-var _ctx: CityPlan.PlanCtx
-## Ground clearance query (x, z, ref_y) -> y; mesh worlds swap in a raycast.
+## Ground clearance query (x, z, ref_y) -> y; main.gd wires the raycast in.
 var ground_fn: Callable
 
 
@@ -38,10 +37,9 @@ static func _damp(rate: float, dt: float) -> float:
 	return 1.0 - exp(-rate * dt)
 
 
-func _init(ctx: CityPlan.PlanCtx) -> void:
-	_ctx = ctx
-	ground_fn = func(x: float, z: float, _ref_y: float) -> float:
-		return RoadProfile.ground_height(x, z, _ctx)
+func _init() -> void:
+	ground_fn = func(_x: float, _z: float, ref_y: float) -> float:
+		return ref_y
 	near = 0.3
 	far = 2000.0
 	fov = cam_fov

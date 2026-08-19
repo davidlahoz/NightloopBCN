@@ -29,3 +29,17 @@ Every third-party asset vendored into this repository, with source and licence.
 - **M.A.V.S — MAdvanced Vehicle System** (`godot/addons/M.A.V.S/`) — by
   [Millu30](https://github.com/Dente222/MAdvanced-Vehicle-Controller), MIT.
   Its VehicleBody3D controller powers promoted ambient-traffic cars.
+- **PavingStones099** (`godot/assets/textures/ground/PavingStones099_*.jpg`) —
+  [ambientCG](https://ambientcg.com/view?id=PavingStones099), CC0. Sidewalk
+  paving.
+- **Grass001** (`godot/assets/textures/ground/Grass001_*.jpg`) —
+  [ambientCG](https://ambientcg.com/view?id=Grass001), CC0. Park/green-space
+  ground (classified from OSM data).
+- **Road007** (`godot/assets/textures/ground/Road007_*.jpg`) —
+  [ambientCG](https://ambientcg.com/view?id=Road007), CC0. Carriageway
+  asphalt and bike lanes (cropped to the markings-free region, retiled).
+- **Truck minipack** (`godot/assets/car/truck-minipack.glb`) — [hskfb.ly/oTAtC](https://skfb.ly/oTAtC) by
+  [Vladek](https://sketchfab.com/vladek27), CC Attribution 4.0.
+  The Ambient-traffic vans and trucks (trailers, chassis-cab, police and ambulance variants excluded).
+- **crash.mp3** (`godot/assets/audio/crash.mp3`) — provided by the project
+  owner; source/licence unknown. Hero-car impact sound.

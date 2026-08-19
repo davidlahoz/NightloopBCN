@@ -2,6 +2,13 @@
 *.tmp
 dist/
 work/
-out/lane_graph_debug.geojson
+# derived data — rebuild with tools/build_lane_graph.py and
+# tools/bake_ground_masks.py (the full-city lane_graph.bin is >100 MB,
+# past GitHub's hard limit)
+out/lane_graph.bin
+out/lane_graph_debug*.geojson
 out/lane_graph_preview.png
+out/lane_slice_preview.png*
 out/facades/
+barcelona/masks/
+tools/__pycache__/

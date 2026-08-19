@@ -47,6 +47,10 @@ func seg_way(i: int) -> int:
 	return _seg_way[i]
 
 
+func way_name(wi: int) -> String:
+	return _names[wi]
+
+
 func way_first_seg(wi: int) -> int:
 	return _way_start[wi]
 

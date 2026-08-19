@@ -26,9 +26,6 @@ const WHEELBASE := 2.62
 const TRACK := 1.56
 const WHEEL_R := 0.325
 
-const BLOCK_WALL := CityPlan.CURB_W + CityPlan.SIDEWALK_W - 0.95  # car centre ~1 m off facades
-const MEDIAN_WALL := 2.05                                          # barrier half + car half width
-
 # ---- dynamic state ----
 var pos := Vector3.ZERO
 var yaw := 0.0
@@ -44,6 +41,7 @@ var slip_yaw_offset := 0.0
 var braking := false
 var carve := 0.0
 var curb_bump := 0.0
+var wall_hit := 0.0    # inward impact speed this frame (m/s), for crash SFX
 var scrub := 0.0
 ## surface wetness 0..1, pushed by the weather system
 var road_wetness := 0.0
@@ -54,8 +52,6 @@ var _roll := 0.0; var _roll_v := 0.0
 var _t_pitch := 0.0; var _t_roll := 0.0
 var _prev_vz := 0.0
 var _prev_vx := 0.0
-var _was_on_road_known := false
-var _was_on_road := false
 
 # ---- wheel state (FL, FR, RL, RR) ----
 var wheel_spin: Array[float] = [0.0, 0.0, 0.0, 0.0]
@@ -72,15 +68,11 @@ var _model_wheels: Array = []      # from CarModel: {pivot, spin, base_pos, up, 
 var _fallback_wheels: Array = []   # procedural: {pivot, spin}
 var _tail_mats: Array = []
 var _head_mat: StandardMaterial3D = null
-var _ctx: CityPlan.PlanCtx
 
-## Ground height query (x, z, ref_y) -> y. Defaults to the procedural plan;
-## mesh worlds (Barcelona) swap in a physics raycast from main.gd.
+## Ground height query (x, z, ref_y) -> y; main.gd wires the Barcelona
+## physics raycast in here.
 var ground_fn: Callable
-## Procedural mode: analytic SDF colliders (curbs/building line/median).
-## Mesh worlds turn this off and collide against StaticBody3D walls instead.
-var use_plan_colliders := true
-## Physics space for mesh-world wall rays (set per frame by main when used).
+## Physics space for mesh-world wall rays (set per frame by main).
 var space: PhysicsDirectSpaceState3D = null
 
 
@@ -88,10 +80,9 @@ static func _damp(rate: float, dt: float) -> float:
 	return 1.0 - exp(-rate * dt)
 
 
-func _init(ctx: CityPlan.PlanCtx) -> void:
-	_ctx = ctx
-	ground_fn = func(x: float, z: float, _ref_y: float) -> float:
-		return RoadProfile.ground_height(x, z, _ctx)
+func _init() -> void:
+	ground_fn = func(_x: float, _z: float, ref_y: float) -> float:
+		return ref_y
 	body_node = Node3D.new()
 	body_node.name = "CarBody"
 	add_child(body_node)
@@ -211,8 +202,7 @@ func set_headlights(hl: float) -> void:
 func update(dt: float, input: InputState) -> void:
 	# ---- surface conditions ----
 	var wet := road_wetness
-	var off_road := _was_on_road_known and not _was_on_road
-	var surf_grip := (0.72 if off_road else 1.0) * (1.0 - wet * wet_grip_loss)
+	var surf_grip := 1.0 - wet * wet_grip_loss
 
 	# ---- steering (mouse carves the line while gliding) ----
 	if input.gliding:
@@ -233,18 +223,18 @@ func update(dt: float, input: InputState) -> void:
 	var az := 0.0
 	braking = false
 	if input.throttle > 0.0:
-		var traction := (1.0 - scrub * 0.45) * (0.8 if off_road else 1.0) * (1.0 - wet * 0.12)
+		var traction := (1.0 - scrub * 0.45) * (1.0 - wet * 0.12)
 		az += accel * (1.0 - maxf(0.0, vz) / top_speed) * traction
 	if input.brake > 0.0:
 		if vz > 0.5:
-			az -= brake_decel * (1.0 - wet * 0.25) * (0.85 if off_road else 1.0)
+			az -= brake_decel * (1.0 - wet * 0.25)
 			braking = true
 		elif vz > -11.0:
 			az -= accel * 0.55   # reverse, capped ~40 km/h
 	if input.handbrake and absf(vz) > 0.5:
 		az -= signf(vz) * 8.5 * (0.7 + 0.3 * surf_grip)
 		braking = true
-	az -= vz * (0.105 if off_road else 0.045) + signf(vz) * 0.35
+	az -= vz * 0.045 + signf(vz) * 0.35
 	az -= absf(vx) * 0.15 * drift_amount * (0.6 + 0.4 * surf_grip)
 	vz += az * dt
 	if absf(vz) < 0.15 and input.throttle == 0.0 and input.brake == 0.0:
@@ -283,15 +273,11 @@ func update(dt: float, input: InputState) -> void:
 	# the suspension. Hard containment only at the building line and the
 	# motorway median barrier.
 	curb_bump = 0.0
-	if not use_plan_colliders:
-		# mesh world: walls are real StaticBody3D geometry — ray pushback
-		_was_on_road = true
-		_was_on_road_known = true
-		var adj := _mesh_wall_collide(dt, cy, sy, wvx, wvz)
-		wvx = adj.x
-		wvz = adj.y
-	if use_plan_colliders:
-		_plan_colliders(dt, cy, sy, wvx, wvz)
+	wall_hit = 0.0
+	# walls are real StaticBody3D geometry — box pushback
+	var adj := _mesh_wall_collide(dt, cy, sy, wvx, wvz)
+	wvx = adj.x
+	wvz = adj.y
 	speed = Vector2(vx, vz).length()
 	slip_yaw_offset = atan2(vx, absf(vz)) if speed > 2.0 else 0.0
 	scrub = minf(1.0, absf(vx) * 0.10 + drift_amount * 0.35 + (0.45 if input.handbrake else 0.0)) if speed > 3.0 else 0.0
@@ -349,60 +335,8 @@ func _mesh_wall_collide(dt: float, cy: float, sy: float, wvx: float, wvz: float)
 		vz = wvx * sy + wvz * cy
 		vz *= 0.985
 		curb_bump = maxf(curb_bump, minf(1.0, into * 0.15))
+		wall_hit = maxf(wall_hit, into)
 	return Vector2(wvx, wvz)
-
-
-## Analytic SDF colliders for the procedural plan (curb bumps, building line,
-## motorway median). Body of the original collider block, verbatim.
-func _plan_colliders(dt: float, cy: float, sy: float, wvx: float, wvz: float) -> void:
-	var rs := CityPlan.sample_road_space(pos.x, pos.z, _ctx.rs, _ctx)
-	var d_now := rs.d
-	var was := _was_on_road
-	var was_known := _was_on_road_known
-	_was_on_road = d_now < 0.0
-	_was_on_road_known = true
-	if was_known and was != (d_now < 0.0) and speed > 0.8:
-		# crossed the curb line: bump ∝ velocity across it
-		var g := _sdf_gradient(pos.x, pos.z)
-		if g.length() > 1e-4:
-			g = g.normalized()
-			var v_across := absf(wvx * g.x + wvz * g.y)
-			curb_bump = minf(1.0, v_across * 0.09)
-			var scrub_f := 1.0 - minf(0.22, v_across * 0.018)
-			vx *= scrub_f; vz *= scrub_f
-			wvx *= scrub_f; wvz *= scrub_f
-
-	# building line: gradient pushback (fillet-rounded SDF, so corners work)
-	if d_now > BLOCK_WALL:
-		var g2 := _sdf_gradient(pos.x, pos.z)
-		if g2.length() > 1e-4:
-			g2 = g2.normalized()
-			var pen := d_now - BLOCK_WALL
-			pos.x -= g2.x * pen
-			pos.z -= g2.y * pen
-			var outward := wvx * g2.x + wvz * g2.y
-			if outward > 0.0:
-				wvx -= outward * 1.35 * g2.x
-				wvz -= outward * 1.35 * g2.y
-				vx = wvx * cy - wvz * sy
-				vz = wvx * sy + wvz * cy
-				vz *= 0.985
-				curb_bump = maxf(curb_bump, minf(1.0, outward * 0.18))
-
-	# motorway median barrier (opens at junctions)
-	if rs.mwayB == 1:
-		var at_a := absf(rs.tA)
-		var at_b := absf(rs.tB)
-		if at_b < MEDIAN_WALL and at_a > rs.faceA + 2.4:
-			var sgn := 1.0 if rs.tB >= 0.0 else -1.0
-			pos.z += sgn * (MEDIAN_WALL - at_b)
-			var inward := -wvz * sgn
-			if inward > 0.0:
-				wvz += sgn * inward * 1.35
-				vx = wvx * cy - wvz * sy
-				vz = wvx * sy + wvz * cy
-				vz *= 0.985
-				curb_bump = maxf(curb_bump, minf(1.0, inward * 0.18))
 
 
 ## Everything after collisions: wheel contacts, sprung body, transforms.
@@ -497,15 +431,3 @@ func _post_colliders(dt: float, cy: float, sy: float) -> void:
 			spin.rotation = Vector3(wheel_spin[i], 0.0, 0.0)
 
 
-func _sdf_gradient(x: float, z: float) -> Vector2:
-	var e := 0.06
-	var rs2 := _ctx.rs2
-	CityPlan.sample_road_space(x + e, z, rs2, _ctx)
-	var dx1 := rs2.d
-	CityPlan.sample_road_space(x - e, z, rs2, _ctx)
-	var dx0 := rs2.d
-	CityPlan.sample_road_space(x, z + e, rs2, _ctx)
-	var dz1 := rs2.d
-	CityPlan.sample_road_space(x, z - e, rs2, _ctx)
-	var dz0 := rs2.d
-	return Vector2((dx1 - dx0) / (2.0 * e), (dz1 - dz0) / (2.0 * e))
